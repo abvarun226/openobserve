@@ -1147,7 +1147,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     </div>
   </div>
   <DashboardMapQueryBuilder :dashboardData="dashboardData" />
-  <DashboardGeoMapQueryBuilder />
+  <DashboardGeoMapQueryBuilder :dashboardData="dashboardData" />
   <DashboardSankeyChartBuilder :dashboardData="dashboardData" />
 </template>
 
