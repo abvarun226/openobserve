@@ -406,6 +406,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 @copy="copyLogToClipboard"
                 @add-field-to-table="addFieldToTable"
                 @add-search-term="addSearchTerm"
+                @view-trace="
+                  redirectToTraces(searchObj.data.queryResults.hits[index])
+                "
               />
             </td>
           </q-tr>
@@ -467,6 +470,7 @@ import EqualIcon from "../../components/icons/EqualIcon.vue";
 import NotEqualIcon from "../../components/icons/NotEqualIcon.vue";
 import useLogs from "../../composables/useLogs";
 import { convertLogData } from "@/utils/logs/convertLogData";
+import { useRouter } from "vue-router";
 
 export default defineComponent({
   name: "SearchResult",
@@ -584,6 +588,7 @@ export default defineComponent({
     const scrollPosition = ref(0);
     const rowsPerPageOptions = [10, 25, 50, 100, 250, 500];
     const disableMoreErrorDetails = ref(false);
+    const router = useRouter();
 
     const {
       searchObj,
@@ -697,6 +702,26 @@ export default defineComponent({
       );
     };
 
+    const redirectToTraces = (log: any) => {
+      // 15 mins +- from the log timestamp
+      const from = log[store.state.zoConfig.timestamp_column] - 900000000;
+      const to = log[store.state.zoConfig.timestamp_column] + 900000000;
+      const refresh = 0;
+
+      router.push({
+        path: "/traces",
+        query: {
+          stream: "default",
+          from,
+          to,
+          refresh,
+          org_identifier: store.state.selectedOrganization.identifier,
+          trace_id: log.trace_id,
+          reload: "true",
+        },
+      });
+    };
+
     return {
       t,
       store,
@@ -728,6 +753,7 @@ export default defineComponent({
       pageNumberInput,
       refreshPartitionPagination,
       disableMoreErrorDetails,
+      redirectToTraces,
     };
   },
   computed: {
@@ -983,8 +1009,14 @@ export default defineComponent({
 <style lang="scss">
 .search-list {
   .copy-log-btn {
-    .q-btn .q-icon {
+    .q-icon {
       font-size: 12px !important;
+    }
+  }
+
+  .view-trace-btn {
+    .q-icon {
+      font-size: 13px !important;
     }
   }
 
