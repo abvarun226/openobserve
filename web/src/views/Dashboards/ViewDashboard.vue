@@ -115,7 +115,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 size="sm"
                 no-caps
                 icon="cancel"
-                @click="cancelAllApiCalls"
+                @click="cancelQuery"
                 data-test="dashboard-cancel-btn"
                 style="width: 20%"
               >
@@ -200,7 +200,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         :showTabs="true"
         :forceLoad="store.state.printMode"
         :searchType="searchType"
-        @panelsValues="handleEmittedData"
+        @panelsValues="getPanelsValues"
       />
 
       <q-dialog
@@ -244,6 +244,7 @@ import ExportDashboard from "@/components/dashboards/ExportDashboard.vue";
 import RenderDashboardCharts from "./RenderDashboardCharts.vue";
 import { copyToClipboard, useQuasar } from "quasar";
 import useNotifications from "@/composables/useNotifications";
+import { usePanelDataLoader } from "@/composables/dashboard/usePanelDataLoader";
 
 const DashboardSettings = defineAsyncComponent(() => {
   return import("./DashboardSettings.vue");
@@ -268,46 +269,17 @@ export default defineComponent({
     const currentDashboardData = reactive({
       data: {},
     });
+    const { cancelQuery } = usePanelDataLoader();
     const { showPositiveNotification, showErrorNotification } =
       useNotifications();
     const disableDateTimeRefresh = ref(false);
-    const receivedData = ref([]);
-    let abortController = new AbortController();
-
-    const handleEmittedData = (panelsValues) => {
-      console.log("handleEmittedData called with:", panelsValues);
-      receivedData.value = panelsValues;
-      disableDateTimeRefresh.value = panelsValues.some((item) => item === true);
-    };
-
-    const cancelAllApiCalls = () => {
-      console.log("cancelAllApiCalls called");
-
-      // Abort the ongoing API call
-      abortController.abort();
-      console.log("Aborted current AbortController instance");
-
-      // Create a new AbortController for future API calls
-      abortController = new AbortController();
-      console.log("Created new AbortController");
-
-      // Reset the received data
-      receivedData.value = receivedData.value.map((item) =>
-        item === true ? false : item
-      );
-      console.log("cancelAllApiCalls updated receivedData", receivedData.value);
-
-      nextTick(() => {
-        disableDateTimeRefresh.value = false;
-      });
-
-      console.log("cancelAllApiCalls done");
-
-      $q.notify({
-        type: "positive",
-        message: "All API calls cancelled successfully",
-      });
-    };
+    const getPanelsValues = computed(() => {
+      return (data) => {
+        console.log("getPanelsValues", data);
+        disableDateTimeRefresh.value = data.some((item) => item === true);
+        console.log("disableDateTimeRefresh", disableDateTimeRefresh.value);
+      };
+    });
 
     let moment: any = () => {};
 
@@ -796,10 +768,10 @@ export default defineComponent({
       timeString,
       searchType,
       quasar,
-      // getPanelsValues,
+      getPanelsValues,
       disableDateTimeRefresh,
-      cancelAllApiCalls,
-      handleEmittedData,
+      // cancelAllApiCalls,
+      cancelQuery,
     };
   },
 });
