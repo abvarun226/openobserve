@@ -197,9 +197,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       @updated:data-zoom="$emit('updated:data-zoom', $event)"
       @update:initial-variable-values="
         (...args) => $emit('update:initial-variable-values', ...args)
-      "
+        "
       ref="PanleSchemaRendererRef"
-    ></PanelSchemaRenderer>
+      ></PanelSchemaRenderer>
+      <!-- @search-request-trace-ids="handleSearchRequestTraceIds" -->
     <q-dialog v-model="showViewPanel">
       <QueryInspector :metaData="metaData" :data="props.data"></QueryInspector>
     </q-dialog>
@@ -285,6 +286,7 @@ export default defineComponent({
     };
 
     const maxQueryRange: any = ref([]);
+    const searchRequestTraceIdsRef: any = ref([]);
 
     const handleResultMetadataUpdate = (metadata: any) => {
       const combinedWarnings: any[] = [];
@@ -305,6 +307,17 @@ export default defineComponent({
       });
       maxQueryRange.value = combinedWarnings;
     };
+
+    // const handleSearchRequestTraceIds = (traceIds: any) => {
+    //   console.log("handleSearchRequestTraceIds", traceIds);
+    //   const searchRequestTraceIds: any[] = [];
+
+    //   traceIds.forEach((traceId: any) => {
+    //     searchRequestTraceIds.push(traceId);
+    //   });
+    //   console.log("handleSearchRequestTraceIds searchRequestTraceIds", searchRequestTraceIds);
+    //   searchRequestTraceIdsRef.value = searchRequestTraceIds;
+    // };
 
     const showText = ref(false);
 
@@ -412,7 +425,9 @@ export default defineComponent({
       store,
       metaDataValue,
       handleResultMetadataUpdate,
+      // handleSearchRequestTraceIds,
       maxQueryRange,
+      searchRequestTraceIdsRef,
       metaData,
       showViewPanel,
       dependentAdHocVariable,

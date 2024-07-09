@@ -222,6 +222,7 @@ export default defineComponent({
     "metadata-update",
     "result-metadata-update",
     "update:initialVariableValues",
+    // "search-request-trace-ids",
   ],
   setup(props, { emit }) {
     const store = useStore();
@@ -243,15 +244,21 @@ export default defineComponent({
       searchType,
     } = toRefs(props);
     // calls the apis to get the data based on the panel config
-    let { data, loading, errorDetail, metadata, resultMetaData } =
-      usePanelDataLoader(
-        panelSchema,
-        selectedTimeObj,
-        variablesData,
-        chartPanelRef,
-        forceLoad,
-        searchType
-      );
+    let {
+      data,
+      loading,
+      errorDetail,
+      metadata,
+      resultMetaData,
+      searchRequestTraceIds,
+    } = usePanelDataLoader(
+      panelSchema,
+      selectedTimeObj,
+      variablesData,
+      chartPanelRef,
+      forceLoad,
+      searchType
+    );
 
     // need tableRendererRef to access downloadTableAsCSV method
     const tableRendererRef = ref(null);
@@ -266,7 +273,7 @@ export default defineComponent({
     // default values will be empty object of panels and variablesData
     const variablesAndPanelsDataLoadingState: any = inject(
       "variablesAndPanelsDataLoadingState",
-      { panels: {}, variablesData: {} }
+      { panels: {}, variablesData: {}, searchRequestTraceIds: {} }
     );
 
     // on loading state change, update the loading state of the panels in variablesAndPanelsDataLoadingState
@@ -279,7 +286,17 @@ export default defineComponent({
         };
       }
     });
+    //watch trace id and add in the searchRequestTraceIds
+    watch(searchRequestTraceIds, (updatedSearchRequestTraceIds) => {
+      console.log("updatedSearchRequestTraceIds", updatedSearchRequestTraceIds);
 
+      if (variablesAndPanelsDataLoadingState) {
+        variablesAndPanelsDataLoadingState.searchRequestTraceIds = {
+          ...variablesAndPanelsDataLoadingState?.searchRequestTraceIds,
+          [panelSchema?.value?.id]: updatedSearchRequestTraceIds,
+        };
+      }
+    });
     // ======= [END] dashboard PrintMode =======
 
     watch(
@@ -330,6 +347,14 @@ export default defineComponent({
       emit("result-metadata-update", resultMetaData.value);
     });
 
+    // watch(searchRequestTraceIds, () => {
+    //   console.log(
+    //     "searchRequestTraceIds----------",
+    //     searchRequestTraceIds.value
+    //   );
+
+    //   emit("search-request-trace-ids", searchRequestTraceIds.value);
+    // });
     const handleNoData = (panelType: any) => {
       const xAlias = panelSchema.value.queries[0].fields.x.map(
         (it: any) => it.alias
@@ -755,6 +780,7 @@ export default defineComponent({
       chartPanelRef,
       data,
       loading,
+      searchRequestTraceIds,
       errorDetail,
       panelData,
       noData,

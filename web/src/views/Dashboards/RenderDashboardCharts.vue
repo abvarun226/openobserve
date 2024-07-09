@@ -162,6 +162,7 @@ export default defineComponent({
     "refresh",
     "onMovePanel",
     "panelsValues",
+    "searchRequestTraceIds",
   ],
   props: {
     viewOnly: {},
@@ -234,6 +235,7 @@ export default defineComponent({
     const variablesAndPanelsDataLoadingState = reactive({
       variablesData: {},
       panels: {},
+      searchRequestTraceIds: {},
     });
 
     // provide variablesAndPanelsDataLoadingState to share data between components
@@ -244,6 +246,11 @@ export default defineComponent({
 
     //computed property based on panels and variables loading state
     const isDashboardVariablesAndPanelsDataLoaded = computed(() => {
+      // console.log(
+      //   "variablesAndPanelsDataLoadingState",
+      //   variablesAndPanelsDataLoadingState
+      // );
+
       // Get values of variablesData and panels
       const variablesDataValues = Object.values(
         variablesAndPanelsDataLoadingState.variablesData
@@ -256,15 +263,46 @@ export default defineComponent({
       const isAllVariablesAndPanelsDataLoaded =
         variablesDataValues.every((value) => value === false) &&
         panelsValues.every((value) => value === false);
+      // console.log(
+      //   "isAllVariablesAndPanelsDataLoaded",
+      //   isAllVariablesAndPanelsDataLoaded
+      // );
+
       return isAllVariablesAndPanelsDataLoaded;
+    });
+
+    const currentQueryTraceIds = computed(() => {
+      console.log(
+        "variablesAndPanelsDataLoadingState",
+        variablesAndPanelsDataLoadingState
+      );
+
+      const traceIds = Object.values(
+        variablesAndPanelsDataLoadingState.searchRequestTraceIds
+      );
+      console.log("traceIds", traceIds);
+
+      if (traceIds.length > 0) {
+        return traceIds?.flat();
+      }
+      return [];
+    });
+
+    watch(currentQueryTraceIds, () => {
+      console.log("currentQueryTraceIds", currentQueryTraceIds.value);
+      emit("searchRequestTraceIds", currentQueryTraceIds.value);
     });
 
     watch(
       variablesAndPanelsDataLoadingState,
       (newValue) => {
         const panelsValues = Object.values(newValue.panels);
+        // const searchRequestTraceIdsWatch = newValue.searchRequestTraceIds;
+        // console.log("searchRequestTraceIdsWatch", searchRequestTraceIdsWatch);
+
         console.log("panelsValues emitted from child:", panelsValues);
         emit("panelsValues", panelsValues);
+        // emit("searchRequestTraceIds", searchRequestTraceIdsWatch);
       },
       { deep: true }
     );
@@ -485,6 +523,7 @@ export default defineComponent({
       variablesValueSelectorRef,
       updateInitialVariableValues,
       isDashboardVariablesAndPanelsDataLoadedDebouncedValue,
+      currentQueryTraceIds,
     };
   },
   methods: {

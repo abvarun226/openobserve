@@ -54,7 +54,7 @@ export const usePanelDataLoader = (
     errorDetail: "",
     metadata: {},
     resultMetaData: [] as any,
-    searchRequestTraceIds: [] as any,
+    searchRequestTraceIds: <string[]>[],
   });
 
   // observer for checking if panel is visible on the screen
@@ -304,11 +304,12 @@ export const usePanelDataLoader = (
               variables: [...(metadata1 || []), ...(metadata2 || [])],
             };
             const { traceparent, traceId } = generateTraceContext();
+            console.log("traceparent", traceparent);
 
             addTraceId(traceId);
             console.log("Adding traceId", traceId);
-            
-            // console.log("Calling search API", query, metadata);
+            console.log("after adding traceId", state.searchRequestTraceIds);
+
             return await queryService
               .search(
                 {
@@ -333,11 +334,13 @@ export const usePanelDataLoader = (
                 // state.data = res.data.hits;
                 state.errorDetail = "";
                 // console.log("API response received");
+                console.log("=======", res.data.trace_id);
 
                 return {
                   result: res.data.hits,
                   metadata: metadata,
                   resultMetaData: { ...res.data },
+                  // searchRequestTraceIds: res.data.trace_id,
                 };
               })
               .catch((error) => {
@@ -352,16 +355,31 @@ export const usePanelDataLoader = (
 
         // Wait for all query promises to resolve
         const sqlqueryResults = await Promise.all(sqlqueryPromise);
+
         state.loading = false;
         state.data = sqlqueryResults.map((it) => it?.result);
         state.metadata = {
           queries: sqlqueryResults.map((it) => it?.metadata),
         };
-
         state.resultMetaData = sqlqueryResults.map((it) => it?.resultMetaData);
+
+        // console.log("sqlqueryResults", sqlqueryResults);
+        // console.log(
+        //   "ssssssss",
+        //   sqlqueryResults.map((it) => it?.resultMetaData.trace_id)
+        // );
+
+        // state.searchRequestTraceIds = sqlqueryResults.map(
+        //   (it) => it?.resultMetaData.trace_id
+        // );
 
         log("logaData: state.data", state.data);
         log("logaData: state.metadata", state.metadata);
+
+        // console.log(
+        //   "Final searchRequestTraceIds before calling cancelQuery:",
+        //   state.searchRequestTraceIds
+        // );
       }
     } catch (error: any) {
       if (
@@ -626,66 +644,34 @@ export const usePanelDataLoader = (
   };
 
   const addTraceId = (traceId: string) => {
+    console.log("addTraceId called with traceId:", traceId);
     if (state.searchRequestTraceIds.includes(traceId)) {
       console.log("traceId already exists", traceId);
       return;
     }
-    console.log("addTraceId", traceId);
-    // console.log("addTraceId", state.searchRequestTraceIds.push(traceId));
-
-    state.searchRequestTraceIds.push(traceId);
-    console.log("state.searchRequestTraceIds", state.searchRequestTraceIds);
+    console.log("Adding traceId", traceId);
+    // const arr = state.searchRequestTraceIds || [];
+    // arr.push(traceId);
+    // state.searchRequestTraceIds = arr;
+    state.searchRequestTraceIds = [...state.searchRequestTraceIds, traceId];
+    // state.searchRequestTraceIds.push(traceId);
+    console.log(
+      "Updated searchRequestTraceIds after add",
+      state.searchRequestTraceIds
+    );
   };
 
   const removeTraceId = (traceId: string) => {
-    console.log("removeTraceId----", traceId);
-
+    console.log("removeTraceId called with traceId:", traceId);
     state.searchRequestTraceIds = state.searchRequestTraceIds.filter(
-      (id: string) => id !== traceId
+      (id: any) => id !== traceId
     );
-    console.log("removeTraceId", state.searchRequestTraceIds);
+    console.log(
+      "Updated searchRequestTraceIds after remove",
+      state.searchRequestTraceIds
+    );
   };
 
-  const cancelQuery = () => {
-    console.log("cancelQuery----", state.searchRequestTraceIds);
-    queryService
-      .delete_running_queries(
-        store.state.selectedOrganization.identifier,
-        state.searchRequestTraceIds
-      )
-
-      .then((res) => {
-        console.log("cancelQuery inside try", res);
-
-        const isCancelled = res.data.some((item: any) => item.is_success);
-        console.log("isCancelled", isCancelled);
-
-        // $q.notify({
-        //   message: isCancelled
-        //     ? "Running query cancelled successfully"
-        //     : "Query execution was completed before cancellation.",
-        //   color: "positive",
-        //   position: "bottom",
-        //   timeout: 1500,
-        // });
-      })
-      .catch((error: any) => {
-        console.log("cancelQuery error", error);
-
-        // $q.notify({
-        //   message:
-        //     error.response?.data?.message || "Failed to delete running query",
-        //   color: "negative",
-        //   position: "bottom",
-        //   timeout: 1500,
-        // });
-      })
-      .finally(() => {
-        // if (searchObj.loading) searchObj.loading = false;
-        // if (searchObj.loadingHistogram) searchObj.loadingHistogram = false;
-        console.log("cancelQuery finally");
-      });
-  };
   const hasAtLeastOneQuery = () =>
     panelSchema.value.queries?.some((q: any) => q?.query);
 
@@ -1061,7 +1047,7 @@ export const usePanelDataLoader = (
       threshold: 0.1, // Adjust as needed
     });
 
-    observer.observe(chartPanelRef.value);
+    if (chartPanelRef?.value) observer.observe(chartPanelRef?.value);
   });
 
   // remove intersection observer
@@ -1070,13 +1056,12 @@ export const usePanelDataLoader = (
       observer.disconnect();
     }
   });
+  console.log("PanelSchema/Time Initial: end of setup", { ...toRefs(state) });
 
   log("PanelSchema/Time Initial: should load the data");
   loadData(); // Loading the data
-
   return {
     ...toRefs(state),
     loadData,
-    cancelQuery,
   };
 };
