@@ -1016,7 +1016,8 @@ const useLogs = () => {
     } catch (e: any) {
       // showErrorNotification("Invalid SQL Syntax");
       console.log(e);
-      notificationMsg.value = "An error occurred while constructing the search query.";
+      notificationMsg.value =
+        "An error occurred while constructing the search query.";
       return "";
     }
   }
@@ -1045,7 +1046,8 @@ const useLogs = () => {
       const parsedSQL: any = fnParsedSQL();
 
       if (searchObj.meta.sqlMode && parsedSQL == undefined) {
-        searchObj.data.queryResults.error = "Error while search partition. Search query is invalid.";
+        searchObj.data.queryResults.error =
+          "Error while search partition. Search query is invalid.";
         return;
       }
 
@@ -1320,7 +1322,8 @@ const useLogs = () => {
                   Math.max(parseInt(currentValue.zo_sql_num, 10), 0),
                 0
               );
-            partitionDetail.partitionTotal[0] = searchObj.data.queryResults.total;
+            partitionDetail.partitionTotal[0] =
+              searchObj.data.queryResults.total;
           }
         } else {
           searchObj.data.queryResults.total =
@@ -1541,11 +1544,11 @@ const useLogs = () => {
         searchObj.data.histogramQuery.query.sql_mode = "full";
 
         // searchObj.data.histogramQuery.query.start_time =
-        //   queryReq.query.start_time;             
-      
+        //   queryReq.query.start_time;
+
         // searchObj.data.histogramQuery.query.end_time =
         //   queryReq.query.end_time;
-   
+
         delete searchObj.data.histogramQuery.query.quick_mode;
         delete searchObj.data.histogramQuery.query.from;
 
@@ -1680,7 +1683,7 @@ const useLogs = () => {
         }
       } else {
         searchObj.loading = false;
-        if(!notificationMsg.value) {
+        if (!notificationMsg.value) {
           notificationMsg.value = "Search query is empty or invalid.";
         }
       }
@@ -1694,7 +1697,9 @@ const useLogs = () => {
       console.log("=================== getQueryData Debug ===================");
     } catch (e: any) {
       searchObj.loading = false;
-      showErrorNotification(notificationMsg.value || "Error occurred during the search operation.");
+      showErrorNotification(
+        notificationMsg.value || "Error occurred during the search operation."
+      );
       notificationMsg.value = "";
     }
   };
@@ -1821,7 +1826,8 @@ const useLogs = () => {
         })
         .catch((err) => {
           searchObj.loading = false;
-          searchObj.data.errorMsg = "Error while processing search total count request.";
+          searchObj.data.errorMsg =
+            "Error while processing search total count request.";
           if (err.response != undefined) {
             searchObj.data.errorMsg = err.response.data.error;
           } else {
@@ -2236,7 +2242,8 @@ const useLogs = () => {
             })
             .catch((err) => {
               searchObj.loadingHistogram = false;
-              searchObj.data.errorMsg = "Error while processing histogram request.";
+              searchObj.data.errorMsg =
+                "Error while processing histogram request.";
               if (err.response != undefined) {
                 searchObj.data.histogram.errorMsg = err.response.data.error;
               } else {
@@ -2875,7 +2882,8 @@ const useLogs = () => {
   function getHistogramTitle() {
     try {
       const currentPage = searchObj.data.resultGrid.currentPage - 1 || 0;
-      const startCount = currentPage * searchObj.meta.resultGrid.rowsPerPage + 1;
+      const startCount =
+        currentPage * searchObj.meta.resultGrid.rowsPerPage + 1;
       let endCount;
 
       let totalCount = searchObj.data.queryResults.total || 0;
@@ -2909,7 +2917,10 @@ const useLogs = () => {
       }
 
       let plusSign: string = "";
-      if(searchObj.data.queryResults.partitionDetail.partitions.length > 1 && searchObj.meta.showHistogram == false) {
+      if (
+        searchObj.data.queryResults.partitionDetail.partitions.length > 1 &&
+        searchObj.meta.showHistogram == false
+      ) {
         plusSign = "+";
       }
       const scanSizeLabel =  (searchObj.data.queryResults.result_cache_ratio !== undefined && searchObj.data.queryResults.result_cache_ratio > 0)? "Delta Scan Size" : "Scan Size";
@@ -3182,7 +3193,7 @@ const useLogs = () => {
   };
 
   const refreshData = () => {
-    try{
+    try {
       if (
         searchObj.meta.refreshInterval > 0 &&
         router.currentRoute.value.name == "logs"
@@ -3201,7 +3212,7 @@ const useLogs = () => {
         store.dispatch("setRefreshIntervalID", refreshIntervalID);
 
         // only notify if user is in logs page
-        if(searchObj.meta.logsVisualizeToggle == "logs"){
+        if (searchObj.meta.logsVisualizeToggle == "logs") {
           $q.notify({
             message: `Live mode is enabled. Only top ${searchObj.meta.resultGrid.rowsPerPage} results are shown.`,
             color: "positive",
@@ -3703,8 +3714,7 @@ const useLogs = () => {
         });
       })
       .finally(() => {
-        if (searchObj.loading) searchObj.loading = false;
-        if (searchObj.loadingHistogram) searchObj.loadingHistogram = false;
+        searchObj.data.searchRequestTraceIds = [];
       });
   };
 
