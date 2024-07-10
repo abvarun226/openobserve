@@ -3688,6 +3688,7 @@ const useLogs = () => {
   };
 
   const cancelQuery = () => {
+    const tracesIds = [...searchObj.data.searchRequestTraceIds];
     searchService
       .delete_running_queries(
         store.state.selectedOrganization.identifier,
@@ -3714,7 +3715,10 @@ const useLogs = () => {
         });
       })
       .finally(() => {
-        searchObj.data.searchRequestTraceIds = [];
+        searchObj.data.searchRequestTraceIds =
+          searchObj.data.searchRequestTraceIds.filter(
+            (id: string) => !tracesIds.includes(id)
+          );
       });
   };
 
