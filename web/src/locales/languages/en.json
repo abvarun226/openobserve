@@ -54,7 +54,9 @@
     "expand": "Expand",
     "date": "Date",
     "description": "Description",
-    "cancelChanges": "Cancel Changes"
+    "cancelChanges": "Cancel Changes",
+    "addGroup":"Add Group",
+    "addCondition":"Add Condition"
   },
   "search": {
     "selectIndex": "Select Stream First",
