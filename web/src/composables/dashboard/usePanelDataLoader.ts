@@ -349,6 +349,10 @@ export const usePanelDataLoader = (
                 // Process API error for "sql"
                 processApiError(error, "sql");
                 return { result: null, metadata: metadata };
+              })
+              .finally(() => {
+                console.log("after finally", state.searchRequestTraceIds);
+                removeTraceId(traceId);
               });
           }
         );
