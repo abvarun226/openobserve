@@ -891,6 +891,7 @@
     "refreshQuery": "Refresh Query"
   },
   "traces": {
-    "viewLogs": "View Logs"
+    "viewLogs": "View Logs",
+    "backToLogs": "Back to Logs"
   }
 }
