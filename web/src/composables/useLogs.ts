@@ -2898,7 +2898,7 @@ const useLogs = () => {
       if(searchObj.data.queryResults.partitionDetail.partitions.length > 1 && searchObj.meta.showHistogram == false) {
         plusSign = "+";
       }
-      const scanSizeLabel = searchObj.data.queryResults.result_cache_ratio > 0 ? "Delta Scan Size" : "Scan Size";
+      const scanSizeLabel =  (searchObj.data.queryResults.result_cache_ratio !== undefined && searchObj.data.queryResults.result_cache_ratio > 0)? "Delta Scan Size" : "Scan Size";
 
       const title =
         "Showing " +
@@ -2910,7 +2910,7 @@ const useLogs = () => {
         plusSign +
         " events in " +
         searchObj.data.queryResults.took +
-        " ms. (+ scanSizeLabel +: " +
+        " ms. (" + scanSizeLabel  + ": " +
         formatSizeFromMB(searchObj.data.queryResults.scan_size) +
         plusSign +
         ")";
