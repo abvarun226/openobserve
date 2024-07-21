@@ -42,10 +42,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           <q-toggle v-if="!beingUpdated && userRole == 'root'" v-model="existingUser"
             :label="t('user.isExistingUser')" />
 
-          <q-input v-if="!beingUpdated" v-model="formData.email" :label="t('user.email') + ' *'" color="input-border"
+          <q-input v-if="(!beingUpdated && !existingUser)" v-model="formData.email" :label="t('user.email') + ' *'" color="input-border"
             bg-color="input-bg" class="q-py-md showLabelOnTop" stack-label outlined filled dense :rules="[
             (val, rules) =>
               rules.email(val) || 'Please enter a valid email address',
+          ]" />
+
+          <q-input v-if="(!beingUpdated && existingUser)" v-model="formData.username" :label="t('user.username') + ' *'" color="input-border"
+            bg-color="input-bg" class="q-py-md showLabelOnTop" stack-label outlined filled dense :rules="[
+            // TODO(omkar): new rule to validate username exists
+            // (val, rules) =>
+            //   rules.email(val) || 'Please enter a valid email address',
           ]" />
 
           <div v-if="!beingUpdated && !existingUser">
@@ -176,7 +183,7 @@ const defaultValue: any = () => {
     role: "admin",
     first_name: "",
     last_name: "",
-    email: "",
+    username: "",
     old_password: "",
     new_password: "",
     change_password: false,
@@ -282,8 +289,8 @@ export default defineComponent({
 
     if (
       this.modelValue &&
-      this.modelValue.email != undefined &&
-      this.modelValue.email != ""
+      this.modelValue.username != undefined &&
+      this.modelValue.username != ""
     ) {
       this.beingUpdated = true;
       this.formData = this.modelValue;
@@ -321,8 +328,8 @@ export default defineComponent({
         selectedOrg = encodeURIComponent(this.formData.other_organization);
       }
       if (this.beingUpdated) {
-        const userEmail = this.formData.email;
-        delete this.formData.email;
+        const username = this.formData.username;
+        delete this.formData.username;
 
         if (this.formData.change_password == false) {
           delete this.formData.old_password;
@@ -330,13 +337,13 @@ export default defineComponent({
         }
 
         userServiece
-          .update(this.formData, selectedOrg, userEmail)
+          .update(this.formData, selectedOrg, username)
           .then((res: any) => {
             if (this.formData.change_password == true) {
               this.logout_confirm = true;
             } else {
               dismiss();
-              this.formData.email = userEmail;
+              this.formData.username = username;
               this.$emit("updated", res.data, this.formData, "updated");
             }
           })
@@ -347,21 +354,21 @@ export default defineComponent({
               timeout: 2000,
             });
             dismiss();
-            this.formData.email = userEmail;
+            this.formData.username = username;
           });
       } else {
         if (this.existingUser) {
-          const userEmail = this.formData.email;
+          const username = this.formData.username;
 
           userServiece
             .updateexistinguser(
               { role: this.formData.role },
               selectedOrg,
-              userEmail
+              username
             )
             .then((res: any) => {
               dismiss();
-              this.formData.email = userEmail;
+              this.formData.username = username;
               this.$emit("updated", res.data, this.formData, "created");
             })
             .catch((err: any) => {
@@ -371,7 +378,7 @@ export default defineComponent({
                 timeout: 2000,
               });
               dismiss();
-              this.formData.email = userEmail;
+              this.formData.username = username;
             });
         } else {
           userServiece
