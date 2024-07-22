@@ -507,6 +507,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               v-model:query="searchObj.data.query"
               :keywords="autoCompleteKeywords"
               :suggestions="autoCompleteSuggestions"
+              @keydown.ctrl.enter="handleRunQueryFn"
               @update:query="updateQueryValue"
               @run-query="handleRunQueryFn"
               :class="
@@ -541,6 +542,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                     : ''
                 "
                 language="ruby"
+                @keydown.ctrl.enter="handleRunQueryFn"
                 @focus="searchObj.meta.functionEditorPlaceholderFlag = false"
                 @blur="searchObj.meta.functionEditorPlaceholderFlag = true"
               />
