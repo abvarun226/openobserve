@@ -30,6 +30,8 @@
     "@openobserve/rrweb-player": "^0.1.1",
     "@quasar/extras": "^1.14.3",
     "cron-parser": "^4.9.0",
+    "datatables.net-dt": "^2.0.8",
+    "datatables.net-vue3": "^3.0.2",
     "date-fns": "^2.0.0",
     "date-fns-tz": "^2.0.0",
     "dompurify": "^3.0.8",
