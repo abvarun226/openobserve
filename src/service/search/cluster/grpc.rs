@@ -50,7 +50,13 @@ pub async fn search(mut req: cluster_rpc::SearchRequest) -> Result<cluster_rpc::
 
     // handle query function
     let (merge_results, scan_stats, _, is_partial, idx_took) =
-        super::search(&trace_id, sql.clone(), req).await?;
+        match super::search(&trace_id, sql.clone(), req).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("[trace_id {trace_id}] grpc->cluster_search: err: {:?}", e);
+                return Err(e);
+            }
+        };
 
     // final result
     let mut hits_buf = Vec::new();
