@@ -56,3 +56,7 @@ CLAUDE.md
 .mcp.json
 tests/ui-testing/playwright-tests/Dashboards/DASHBOARD_VARIABLES_FIXES.md
 tests/ui-testing/fixtures/correlation.json
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db

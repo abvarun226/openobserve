@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "openobserve",
+  "project_id": "14d1a603-6af2-4104-a5a9-5a1ac9a8632f"
+}
