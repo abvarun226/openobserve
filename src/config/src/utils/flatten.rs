@@ -22,6 +22,15 @@ pub fn flatten(to_flatten: Value) -> Result<Value, anyhow::Error> {
     flatten_with_level(to_flatten, 0)
 }
 
+/// Return true when an object contains only scalar values (no nested objects or arrays).
+#[inline]
+pub fn is_flat(val: &Value) -> bool {
+    match val {
+        Value::Object(map) => map.values().all(|v| !v.is_object() && !v.is_array()),
+        _ => true,
+    }
+}
+
 /// Flattens the provided JSON object (`current`).
 ///
 /// It will return an error if flattening the object would make two keys to be
@@ -31,12 +40,28 @@ pub fn flatten(to_flatten: Value) -> Result<Value, anyhow::Error> {
 /// # Errors
 /// Will return `Err` if `to_flatten` it's not an object, or if flattening the
 /// object would result in two or more keys colliding.
+#[inline(always)]
 pub fn flatten_with_level(to_flatten: Value, max_level: u32) -> Result<Value, anyhow::Error> {
     // quick check to see if we have an object`
     let to_flatten = match to_flatten {
         Value::Object(v) => {
-            if v.is_empty() || !v.iter().any(|(_k, v)| v.is_object() || v.is_array()) {
-                if v.iter().all(|(k, _v)| check_key(k)) {
+            if v.is_empty() {
+                return Ok(Value::Object(v));
+            }
+            // Single-pass check: are all values flat AND all keys valid?
+            let mut needs_flatten = false;
+            let mut needs_format = false;
+            for (k, val) in v.iter() {
+                if val.is_object() || val.is_array() {
+                    needs_flatten = true;
+                    break;
+                }
+                if !needs_format && !check_key(k) {
+                    needs_format = true;
+                }
+            }
+            if !needs_flatten {
+                if !needs_format {
                     return Ok(Value::Object(v));
                 }
                 let mut formatted_map = Map::<String, Value>::with_capacity(v.len());
@@ -131,7 +156,7 @@ fn flatten_array(
     //     let parent_key = format!("{}{}{}", parent_key, KEY_SEPARATOR, i);
     //     flatten_value(obj, parent_key, depth + 1, flattened)?;
     // }
-    let v = Value::String(Value::Array(current.to_vec()).to_string());
+    let v = Value::String(Value::Array(current).to_string());
     flatten_value(v, parent_key.to_string(), max_level, depth, flattened)?;
     Ok(())
 }
@@ -182,8 +207,8 @@ pub fn format_label_name(label_name: &str) -> String {
 }
 
 fn check_key(key: &str) -> bool {
-    key.chars()
-        .all(|c| c.is_lowercase() || c.is_numeric() || c == '_')
+    key.bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || !b.is_ascii())
 }
 
 #[cfg(test)]

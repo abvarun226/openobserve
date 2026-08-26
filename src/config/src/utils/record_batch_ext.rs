@@ -905,7 +905,31 @@ pub fn sort_record_batch_by_column(
 
 pub fn convert_json_to_record_batch(
     schema: &Arc<Schema>,
-    data: &[Arc<serde_json::Value>],
+    data: &[serde_json::Value],
+) -> Result<RecordBatch, ArrowError> {
+    if data.is_empty() {
+        return Ok(RecordBatch::new_empty(schema.clone()));
+    }
+
+    // Parallel Arrow conversion for large batches: split into chunks,
+    // convert each chunk independently, then concat.
+    if data.len() > 1024 {
+        use rayon::prelude::*;
+        let chunk_size = (data.len() / rayon::current_num_threads()).max(256);
+        let batches: Result<Vec<RecordBatch>, ArrowError> = data
+            .par_chunks(chunk_size)
+            .map(|chunk| convert_json_to_record_batch_inner(schema, chunk))
+            .collect();
+        let batches = batches?;
+        return arrow::compute::concat_batches(schema, &batches);
+    }
+
+    convert_json_to_record_batch_inner(schema, data)
+}
+
+fn convert_json_to_record_batch_inner(
+    schema: &Arc<Schema>,
+    data: &[serde_json::Value],
 ) -> Result<RecordBatch, ArrowError> {
     if data.is_empty() {
         return Ok(RecordBatch::new_empty(schema.clone()));
@@ -932,8 +956,41 @@ pub fn convert_json_to_record_batch(
     // Cache data types for faster access
     let data_types: Vec<&DataType> = schema.fields().iter().map(|f| f.data_type()).collect();
 
-    // Single-pass traversal with bitmap for present fields
-    for record in data.iter() {
+    // Build a direct-index mapping from the first record's key order.
+    let mut key_order_indices: Vec<usize> = Vec::new();
+    let mut first_record_len: usize = 0;
+    let mut field_present = vec![false; num_fields];
+
+    // Process first record to build the key-order index
+    if let Some(first) = data.first() {
+        if let Some(obj) = first.as_object() {
+            first_record_len = obj.len();
+            key_order_indices.reserve(first_record_len);
+            for (key, value) in obj.iter() {
+                if let Some(&idx) = field_indices.get(key.as_str()) {
+                    key_order_indices.push(idx);
+                    field_present[idx] = true;
+                    append_value_optimized(&mut builders[idx], data_types[idx], value)?;
+                } else {
+                    key_order_indices.push(usize::MAX);
+                }
+            }
+            for (idx, present) in field_present.iter_mut().enumerate() {
+                if !*present {
+                    append_null_optimized(&mut builders[idx], data_types[idx]);
+                } else {
+                    *present = false;
+                }
+            }
+        }
+    }
+
+    // Check if all schema fields are covered by the first record
+    let first_covers_all = key_order_indices.len() == num_fields
+        && key_order_indices.iter().all(|&idx| idx != usize::MAX);
+
+    // Process remaining records
+    for record in data.iter().skip(1) {
         let obj = match record.as_object() {
             Some(obj) => obj,
             None => {
@@ -941,21 +998,34 @@ pub fn convert_json_to_record_batch(
             }
         };
 
-        // Use bitmap to track present fields (more efficient than HashSet)
-        let mut field_present = vec![false; num_fields];
-
-        // Process all fields present in this record
-        for (key, value) in obj.iter() {
-            if let Some(&idx) = field_indices.get(key.as_str()) {
-                field_present[idx] = true;
+        if obj.len() == first_record_len && first_covers_all {
+            // Fast path: all fields present, skip null tracking
+            for ((_key, value), &idx) in obj.iter().zip(key_order_indices.iter()) {
                 append_value_optimized(&mut builders[idx], data_types[idx], value)?;
+            }
+            continue; // skip null-fill loop
+        } else if obj.len() == first_record_len {
+            // Same field count but not all schema fields covered
+            for ((_key, value), &idx) in obj.iter().zip(key_order_indices.iter()) {
+                if idx != usize::MAX {
+                    field_present[idx] = true;
+                    append_value_optimized(&mut builders[idx], data_types[idx], value)?;
+                }
+            }
+        } else {
+            for (key, value) in obj.iter() {
+                if let Some(&idx) = field_indices.get(key.as_str()) {
+                    field_present[idx] = true;
+                    append_value_optimized(&mut builders[idx], data_types[idx], value)?;
+                }
             }
         }
 
-        // Append null for missing fields (using bitmap check)
-        for (idx, &is_present) in field_present.iter().enumerate() {
-            if !is_present {
+        for (idx, present) in field_present.iter_mut().enumerate() {
+            if !*present {
                 append_null_optimized(&mut builders[idx], data_types[idx]);
+            } else {
+                *present = false;
             }
         }
     }

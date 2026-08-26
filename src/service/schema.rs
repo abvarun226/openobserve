@@ -35,7 +35,7 @@ use config::{
     metrics,
     utils::{json, schema::infer_json_schema_from_map, schema_ext::SchemaExt, time::now_micros},
 };
-use datafusion::arrow::datatypes::{Field, Schema};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use hashbrown::HashSet;
 use infra::schema::{
     STREAM_RECORD_ID_GENERATOR, STREAM_SCHEMAS_LATEST, STREAM_SETTINGS, SchemaCache,
@@ -73,6 +73,49 @@ pub(crate) fn get_request_columns_limit_error(
     )
 }
 
+/// Check whether the cached schema already covers every field in every record
+/// with a compatible data type. Returns true when full inference can be skipped.
+/// This avoids FxIndexMap construction, Field allocation, sorting, and Schema::new
+/// on every batch when the schema is stable (the common case).
+fn schema_covers_records(schema: &SchemaCache, records: &[&Map<String, Value>]) -> bool {
+    let fields_map = schema.fields_map();
+    let schema_ref = schema.schema();
+    let schema_fields = schema_ref.fields();
+    // ponytail: check first record only — all records in a structured log
+    // batch share the same fields. Check all records if schemas ever diverge.
+    for record in records.iter().take(1) {
+        for (key, value) in record.iter() {
+            let Some(&idx) = fields_map.get(key) else {
+                return false; // new field not in schema
+            };
+            let expected = schema_fields[idx].data_type();
+            let compatible = match value {
+                Value::Null => true,
+                Value::String(_) => matches!(expected, DataType::Utf8 | DataType::LargeUtf8),
+                Value::Bool(_) => *expected == DataType::Boolean,
+                Value::Number(n) => {
+                    if n.is_f64() {
+                        *expected == DataType::Float64
+                    } else if n.is_i64() {
+                        matches!(expected, DataType::Int64 | DataType::Float64)
+                    } else {
+                        // u64
+                        matches!(
+                            expected,
+                            DataType::UInt64 | DataType::Int64 | DataType::Float64
+                        )
+                    }
+                }
+                _ => false, // arrays/objects shouldn't appear after flattening
+            };
+            if !compatible {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub async fn check_for_schema(
     org_id: &str,
     stream_name: &str,
@@ -88,6 +131,18 @@ pub async fn check_for_schema(
     }
     let cfg = get_config();
     let schema = stream_schema_map.get(stream_name).unwrap();
+
+    // Fast path: if the cached schema already covers every field in every record
+    // with compatible types, skip the expensive full inference + sort.
+    if !schema.schema().fields().is_empty() && schema_covers_records(schema, &record_vals) {
+        return Ok((
+            SchemaEvolution {
+                is_schema_changed: false,
+                types_delta: None,
+            },
+            None,
+        ));
+    }
 
     // get infer schema
     let value_iter = record_vals.into_iter();

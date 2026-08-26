@@ -422,36 +422,41 @@ impl Writer {
 
     fn preprocess_batch(&self, mut entries: Vec<Entry>) -> Result<crate::ProcessedBatch> {
         let _start_preprocess_batch = Instant::now();
-        // Serialize entries to bytes for WAL writing
-        let bytes_entries = entries
-            .iter_mut()
-            .map(|entry| entry.into_bytes())
-            .collect::<Result<Vec<_>>>()?;
+        let stream_type = self.key.stream_type.clone();
 
-        // Bulk convert to Arrow RecordBatch
-        let batch_entries = entries
-            .iter()
-            .map(|entry| {
-                entry.into_batch(self.key.stream_type.clone(), entry.schema.clone().unwrap())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // Single pass: serialize to WAL bytes AND convert to Arrow per entry.
+        // Processing both while entry.data is cache-hot improves locality.
+        let mut bytes_entries = Vec::with_capacity(entries.len());
+        let mut batch_entries = Vec::with_capacity(entries.len());
+        let mut entries_json_size = 0usize;
+        let mut entries_arrow_size = 0usize;
 
-        // Calculate total sizes for rotation check
-        let (entries_json_size, entries_arrow_size) = batch_entries
-            .iter()
-            .map(|entry| (entry.data_json_size, entry.data_arrow_size))
-            .fold(
-                (0, 0),
-                |(acc_json_size, acc_arrow_size), (json_size, arrow_size)| {
-                    (acc_json_size + json_size, acc_arrow_size + arrow_size)
-                },
+        for entry in entries.iter_mut() {
+            let schema = entry.schema.clone().unwrap();
+            let st = stream_type.clone();
+
+            // Run WAL serialization and Arrow conversion in parallel.
+            // Both operations read entry.data independently.
+            let entry_ref: &Entry = &*entry;
+            let (wal_result, batch_result) = rayon::join(
+                || entry_ref.serialize_wal_bytes(),
+                || entry_ref.into_batch(st, schema),
             );
 
-        // Move entries into ProcessedBatch
-        // Clear the heavy data field after conversion to avoid memory duplication
-        // The JSON data is already in bytes_entries and Arrow format in batch_entries
-        for entry in entries.iter_mut() {
-            let _ = std::mem::take(&mut entry.data);
+            let (wal_bytes, data_size) = wal_result?;
+            entry.data_size = data_size;
+            let batch = batch_result?;
+            entries_json_size += batch.data_json_size;
+            entries_arrow_size += batch.data_arrow_size;
+            bytes_entries.push(wal_bytes);
+            batch_entries.push(batch);
+            // Defer drop of parsed records to a background thread.
+            // Dropping 10k IndexMap<String, Value> objects involves ~500k frees
+            // which takes ~20ms. Moving this off the critical path.
+            // Defer drop to a dedicated OS thread. Avoids contention with
+            // rayon's work-stealing pool (used by parse + Arrow).
+            let old_data = std::mem::take(&mut entry.data);
+            rayon::spawn(move || drop(old_data));
         }
 
         let _start_preprocess_batch_duration = _start_preprocess_batch.elapsed();

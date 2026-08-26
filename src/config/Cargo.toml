@@ -17,6 +17,7 @@ argon2.workspace = true
 arrow.workspace = true
 arrow-json.workspace = true
 arrow-schema.workspace = true
+rayon.workspace = true
 async-recursion.workspace = true
 async-walkdir.workspace = true
 aws-config.workspace = true

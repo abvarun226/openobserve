@@ -212,6 +212,31 @@ pub async fn ingest(
     let mut stream_status = StreamStatus::new(&stream_name);
     let mut json_data_by_stream: HashMap<String, (Vec<(i64, _)>, Option<usize>)> = HashMap::new();
     let mut size_by_stream = HashMap::new();
+    let mut record_count: u32 = 0;
+    let mut first_record_flat = false;
+
+    // Cache per-stream flags before the loop to avoid HashMap lookups per record
+    let uds_fields = user_defined_schema_map
+        .get(&stream_name)
+        .and_then(|v| v.as_ref())
+        .cloned();
+    let need_original = streams_need_original_map
+        .get(&stream_name)
+        .copied()
+        .unwrap_or(false);
+    let need_all_values = streams_need_all_values_map
+        .get(&stream_name)
+        .copied()
+        .unwrap_or(false);
+
+    // Bulk fast path: skip flatten + handle_timestamp when data is pre-processed
+    let bulk_fast = usage_type == UsageType::Bulk
+        && executable_pipeline.is_none()
+        && uds_fields.is_none()
+        && !need_original
+        && !need_all_values
+        && extend_json.is_none();
+
     for ret in data.iter() {
         let mut item = match ret {
             Ok(item) => item,
@@ -232,11 +257,8 @@ pub async fn ingest(
         let original_data = if item.is_object() {
             // 2. current stream does not have pipeline
             if executable_pipeline.is_none() {
-                // current stream requires original
-                streams_need_original_map
-                    .get(&stream_name)
-                    .is_some_and(|v| *v)
-                    .then(|| item.to_string())
+                // current stream requires original (use cached flag)
+                need_original.then(|| item.to_string())
             } else {
                 // 3. with pipeline, storing original as long as streams_need_original_set is not
                 //    empty
@@ -247,18 +269,50 @@ pub async fn ingest(
             None // `item` won't be flattened, no need to store original
         };
 
-        // we report stream size before pushing data to pipeline
-        // this is to capture the actual size of stream at the time of ingestion
-        let size: &mut usize = size_by_stream.entry(stream_name.clone()).or_insert(0);
-        *size += estimate_json_bytes(&item);
+        // NOTE: size_by_stream is populated lazily — only for pipeline paths
+        // where destination streams differ. For the non-pipeline path, write_file
+        // computes the actual serialized size via into_bytes.
 
         if executable_pipeline.is_some() {
             // buffer the records, timestamp, and originals for pipeline batch processing
             pipeline_inputs.push(item);
             original_options.push(original_data);
+        } else if bulk_fast {
+            // Bulk fast path: records are already flat with valid timestamps
+            // from bulk.rs parallel parse. Extract directly.
+            let local_val = match item {
+                json::Value::Object(val) => val,
+                _ => continue,
+            };
+            let timestamp = local_val
+                .get(config::TIMESTAMP_COL_NAME)
+                .and_then(|v| v.as_i64())
+                .unwrap_or_else(|| config::utils::time::now_micros());
+
+            match json_data_by_stream.get_mut(&stream_name) {
+                Some((ts_data, fn_num)) => {
+                    ts_data.push((timestamp, local_val));
+                    *fn_num = need_usage_report.then_some(0);
+                }
+                None => {
+                    json_data_by_stream.insert(
+                        stream_name.clone(),
+                        (vec![(timestamp, local_val)], need_usage_report.then_some(0)),
+                    );
+                }
+            };
+            stream_status.status.successful += 1;
         } else {
-            // JSON Flattening - use per-stream flatten level
-            let mut res = flatten::flatten_with_level(item, flatten_level)?;
+            // JSON Flattening — skip after the first record is confirmed flat
+            let mut res = if first_record_flat {
+                item
+            } else {
+                let flattened = flatten::flatten_with_level(item, flatten_level)?;
+                if !first_record_flat && flatten::is_flat(&flattened) {
+                    first_record_flat = true;
+                }
+                flattened
+            };
 
             // handle timestamp
             let timestamp = match handle_timestamp(&mut res, min_ts, max_ts) {
@@ -285,14 +339,12 @@ pub async fn ingest(
                 _ => unreachable!(),
             };
 
-            if let Some(Some(fields)) = user_defined_schema_map.get(&stream_name) {
+            if let Some(fields) = &uds_fields {
                 local_val = crate::service::ingestion::refactor_map(local_val, fields);
             }
 
             // add `_original` and '_record_id` if required by StreamSettings
-            if streams_need_original_map
-                .get(&stream_name)
-                .is_some_and(|v| *v)
+            if need_original
                 && let Some(original_data) = original_data
             {
                 local_val.insert(ORIGINAL_DATA_COL_NAME.to_string(), original_data.into());
@@ -308,10 +360,7 @@ pub async fn ingest(
             }
 
             // add `_all_values` if required by StreamSettings
-            if streams_need_all_values_map
-                .get(&stream_name)
-                .is_some_and(|v| *v)
-            {
+            if need_all_values {
                 let mut values = Vec::with_capacity(local_val.len());
                 for (k, value) in local_val.iter() {
                     if ![
@@ -348,7 +397,10 @@ pub async fn ingest(
                 }
             };
         }
-        tokio::task::coop::consume_budget().await;
+        record_count += 1;
+        if record_count % 64 == 0 {
+            tokio::task::coop::consume_budget().await;
+        }
     }
 
     // batch process records through pipeline
@@ -508,7 +560,10 @@ pub async fn ingest(
                             *size += original_size;
                         }
 
-                        tokio::task::coop::consume_budget().await;
+                        record_count += 1;
+                        if record_count % 64 == 0 {
+                            tokio::task::coop::consume_budget().await;
+                        }
                     }
                 }
             }
@@ -621,6 +676,7 @@ pub async fn ingest(
     ))
 }
 
+#[inline(always)]
 pub fn handle_timestamp(
     value: &mut json::Value,
     min_ts: i64,

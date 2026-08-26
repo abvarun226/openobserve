@@ -291,7 +291,7 @@ impl Metadata for DistinctValues {
                     records: vec![],
                     records_size: 0,
                 });
-                hour_buf.records.push(Arc::new(data));
+                hour_buf.records.push(data);
                 hour_buf.records_size += data_size;
             }
 

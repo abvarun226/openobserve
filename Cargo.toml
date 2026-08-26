@@ -22,7 +22,7 @@ publish = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = []
+default = ["mimalloc"]
 enterprise = []
 cloud = []
 mimalloc = ["dep:mimalloc"]
@@ -136,6 +136,7 @@ sea-orm.workspace = true
 segment.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+simd-json.workspace = true
 sha256.workspace = true
 snafu.workspace = true
 snap.workspace = true
@@ -353,7 +354,8 @@ sea-orm-migration = { version = "1.1.8", features = [
 ] }
 segment = "~0.2.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+simd-json = { version = "0.14", features = ["serde_impl"] }
 sha1 = "0.10.6"
 sha256 = "1.4.0"
 snafu = "0.8.9"

@@ -159,8 +159,7 @@ impl Values {
                     .map_err(|e| anyhow!("Failed to convert VRL to RecordBatch: {}", e))
             }
             Values::Json(data) => {
-                let data_refs: Vec<_> = data.iter().map(|row| Arc::new(row.clone())).collect();
-                convert_json_to_record_batch(schema, &data_refs)
+                convert_json_to_record_batch(schema, data)
                     .map(|batch| vec![batch])
                     .map_err(|e| anyhow!("Failed to convert JSON to RecordBatch: {}", e))
             }
@@ -261,7 +260,6 @@ pub mod remote {
             infra::schema::get_settings(org_id, table_name, StreamType::EnrichmentTables)
                 .await
                 .unwrap_or_default();
-        let data: Vec<_> = data.iter().map(|row| Arc::new(row.clone())).collect();
         let data = convert_json_to_record_batch(schema.schema(), &data)?;
         let data = write_recordbatch_to_parquet(
             schema.schema().clone(),
@@ -310,7 +308,6 @@ pub mod remote {
             infra::schema::get_settings(org_id, table_name, StreamType::EnrichmentTables)
                 .await
                 .unwrap_or_default();
-        let data: Vec<_> = data.iter().map(|row| Arc::new(row.clone())).collect();
         let data = convert_json_to_record_batch(schema.schema(), &data)?;
         let data = write_recordbatch_to_parquet(
             schema.schema().clone(),

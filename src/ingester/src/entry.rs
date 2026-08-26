@@ -33,7 +33,7 @@ pub struct Entry {
     pub schema: Option<Arc<Schema>>,
     pub schema_key: Arc<str>,
     pub partition_key: Arc<str>, // 2023/12/18/00/country=US/state=CA
-    pub data: Vec<Arc<serde_json::Value>>,
+    pub data: Vec<serde_json::Value>,
     pub data_size: usize,
 }
 
@@ -49,14 +49,82 @@ impl Entry {
             data_size: 0,
         }
     }
+    /// Serialize WAL bytes without mutating self.data_size.
+    /// Returns (wal_bytes, data_size) for use in parallel contexts.
+    pub fn serialize_wal_bytes(&self) -> Result<(Vec<u8>, usize)> {
+        let stream = self.stream.as_bytes();
+        let schema_key = self.schema_key.as_bytes();
+        let partition_key = self.partition_key.as_bytes();
+        // Parallel WAL serialization: serialize each record independently,
+        // then join with commas into a JSON array.
+        let data = if self.data.len() > 256 {
+            use rayon::prelude::*;
+            // Serialize chunks of records in parallel, then join into JSON array.
+            // par_chunks reduces scheduling overhead vs per-record par_iter.
+            let num_threads = rayon::current_num_threads();
+            let chunk_size = (self.data.len() / num_threads).max(64);
+            let chunk_bytes: Vec<Vec<u8>> = self.data
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    // Pre-estimate ~800 bytes per record (50 fields × ~16 bytes)
+                    let mut buf = Vec::with_capacity(chunk.len() * 800);
+                    for (i, val) in chunk.iter().enumerate() {
+                        if i > 0 {
+                            buf.push(b',');
+                        }
+                        serde_json::to_writer(&mut buf, val).unwrap();
+                    }
+                    buf
+                })
+                .collect();
+            let total_len: usize = chunk_bytes.iter().map(|c| c.len()).sum::<usize>()
+                + chunk_bytes.len() + 1;
+            let mut data = Vec::with_capacity(total_len);
+            data.push(b'[');
+            for (i, chunk) in chunk_bytes.iter().enumerate() {
+                if i > 0 {
+                    data.push(b',');
+                }
+                data.extend_from_slice(chunk);
+            }
+            data.push(b']');
+            data
+        } else {
+            serde_json::to_vec(&self.data).context(JSONSerializationSnafu)?
+        };
+        let data_size = data.len();
+        let header_size = 2 + stream.len() + 2 + schema_key.len()
+            + 2 + partition_key.len() + 4 + 2 + self.org_id.len();
+        let mut buf = Vec::with_capacity(header_size + data_size);
+        buf.write_u16::<BigEndian>(stream.len() as u16)
+            .context(WriteDataSnafu)?;
+        buf.extend_from_slice(stream);
+        buf.write_u16::<BigEndian>(schema_key.len() as u16)
+            .context(WriteDataSnafu)?;
+        buf.extend_from_slice(schema_key);
+        buf.write_u16::<BigEndian>(partition_key.len() as u16)
+            .context(WriteDataSnafu)?;
+        buf.extend_from_slice(partition_key);
+        buf.write_u32::<BigEndian>(data_size as u32)
+            .context(WriteDataSnafu)?;
+        buf.extend_from_slice(&data);
+        buf.write_u16::<BigEndian>(self.org_id.len() as u16)
+            .context(WriteDataSnafu)?;
+        buf.extend_from_slice(self.org_id.as_bytes());
+        Ok((buf, data_size))
+    }
+
     pub fn into_bytes(&mut self) -> Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(4096);
         let stream = self.stream.as_bytes();
         let schema_key = self.schema_key.as_bytes();
         let partition_key = self.partition_key.as_bytes();
         let data = serde_json::to_vec(&self.data).context(JSONSerializationSnafu)?;
         let data_size = data.len();
-        self.data_size = data_size; // reset data size
+        self.data_size = data_size;
+        // Pre-allocate with exact capacity to avoid growth
+        let header_size = 2 + stream.len() + 2 + schema_key.len()
+            + 2 + partition_key.len() + 4 + 2 + self.org_id.len();
+        let mut buf = Vec::with_capacity(header_size + data_size);
         buf.write_u16::<BigEndian>(stream.len() as u16)
             .context(WriteDataSnafu)?;
         buf.extend_from_slice(stream);

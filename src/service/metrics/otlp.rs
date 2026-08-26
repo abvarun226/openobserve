@@ -553,7 +553,7 @@ pub async fn handle_otlp_request(
             });
             hour_buf
                 .records
-                .push(Arc::new(json::Value::Object(val_map.to_owned())));
+                .push(json::Value::Object(val_map.to_owned()));
             hour_buf.records_size += value_str.len();
 
             // real time alert

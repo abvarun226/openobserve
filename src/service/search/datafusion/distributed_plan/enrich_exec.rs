@@ -169,7 +169,7 @@ async fn get_data(
     )
     .await
     {
-        Ok((data, _min_ts, _max_ts)) => data.into_iter().map(Arc::new).collect::<Vec<_>>(),
+        Ok((data, _min_ts, _max_ts)) => data,
         Err(e) => return internal_err!("get enrichment data from db: {e}"),
     };
 

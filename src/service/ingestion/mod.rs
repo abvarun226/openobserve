@@ -332,19 +332,36 @@ pub fn get_write_partition_key(
     local_val: &Map<String, Value>,
     suffix: Option<&str>,
 ) -> String {
-    // get time file name
-    let mut time_key = match time_level {
-        PartitionTimeLevel::Unset | PartitionTimeLevel::Hourly => Utc
-            .timestamp_nanos(timestamp * 1000)
-            .format("%Y/%m/%d/%H")
-            .to_string(),
-        PartitionTimeLevel::Daily => Utc
-            .timestamp_nanos(timestamp * 1000)
-            .format("%Y/%m/%d/00")
-            .to_string(),
-    };
+    // Build time key from integer arithmetic instead of chrono formatting.
+    // timestamp is microseconds since epoch.
+    let secs = (timestamp / 1_000_000) as i64;
+    let hourly = !matches!(time_level, PartitionTimeLevel::Daily);
+
+    // Convert epoch seconds to civil date + hour
+    let day_secs = secs.rem_euclid(86400);
+    let mut days = ((secs - day_secs) / 86400) as i32;
+    let hour = if hourly { (day_secs / 3600) as u32 } else { 0 };
+
+    // Civil calendar from days since 1970-01-01 (algorithm from Howard Hinnant)
+    days += 719468;
+    let era = days.div_euclid(146097);
+    let doe = days.rem_euclid(146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i32 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    // Pre-allocate: "YYYY/MM/DD/HH/suffix" + partition keys
+    let mut time_key = String::with_capacity(48);
+    use std::fmt::Write;
+    let _ = write!(time_key, "{:04}/{:02}/{:02}/{:02}", y, m, d, hour);
+
     if let Some(s) = suffix {
-        time_key.push_str(&format!("/{s}"));
+        time_key.push('/');
+        time_key.push_str(s);
     } else {
         time_key.push_str("/default");
     }
@@ -357,7 +374,8 @@ pub fn get_write_partition_key(
             None => "null".to_string(),
         };
         let val = key.get_partition_key(&val);
-        time_key.push_str(&format!("/{}", format_partition_key(&val)));
+        time_key.push('/');
+        time_key.push_str(&format_partition_key(&val));
     }
     time_key
 }

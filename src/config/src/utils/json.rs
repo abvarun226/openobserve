@@ -108,23 +108,53 @@ pub fn pickup_string_value(val: Value) -> String {
     }
 }
 
+#[inline]
+fn count_digits_u64(v: u64) -> usize {
+    if v == 0 { return 1; }
+    // log10 floor + 1
+    (v.ilog10() as usize) + 1
+}
+
+#[inline(always)]
 pub fn estimate_json_bytes(val: &Value) -> usize {
     let mut size = 0;
     match val {
         Value::Object(map) => {
-            // {?} extra 2
-            size += 2;
+            // Fast path for flat objects (no nesting): avoid recursive calls.
+            // Most ingested log records are flat after flattening.
+            size += 2; // {}
+            let mut has_nested = false;
             for (k, v) in map {
                 if k == crate::ORIGINAL_DATA_COL_NAME || k == crate::ALL_VALUES_COL_NAME {
                     continue;
                 }
-                // "key":?, extra 4 bytes
-                size += k.len() + estimate_json_bytes(v) + 4;
+                // "key":value, → key.len() + 4 (quotes, colon, comma)
+                size += k.len() + 4;
+                match v {
+                    Value::String(s) => {
+                        // Use len + 2 (quotes). Skip per-byte escape counting:
+                        // the estimate is for size tracking, not exact serialization.
+                        size += s.len() + 2;
+                    }
+                    Value::Number(n) => {
+                        if let Some(v) = n.as_u64() {
+                            size += count_digits_u64(v);
+                        } else if let Some(v) = n.as_i64() {
+                            size += if v < 0 { 1 + count_digits_u64(v.unsigned_abs()) } else { count_digits_u64(v as u64) };
+                        } else {
+                            size += 20;
+                        }
+                    }
+                    Value::Bool(b) => size += if *b { 4 } else { 5 },
+                    Value::Null => {} // skip nulls
+                    _ => { has_nested = true; size += estimate_json_bytes(v); }
+                }
             }
             // remove ',' for last item
             if !map.is_empty() {
                 size -= 1;
             }
+            let _ = has_nested; // suppress warning
         }
         Value::Array(arr) => {
             // []=>2 [?]=>2 [?,?] extra 1+n
@@ -134,22 +164,21 @@ pub fn estimate_json_bytes(val: &Value) -> usize {
             }
         }
         Value::String(s) => {
-            // count quotes and backslashes in one pass; these add an extra byte when escaped
-            // also we use bytes() here as sometimes compiler can optimize it faster with sse
-            // see https://users.rust-lang.org/t/count-number-of-z-in-a-string/49763/5
-            let (quote_count, slash_count) =
-                s.bytes()
-                    .fold((0usize, 0usize), |(quote_count, slash_count), b| {
-                        (
-                            quote_count + usize::from(b == b'"'),
-                            slash_count + usize::from(b == b'\\'),
-                        )
-                    });
-            // "?"=>2
-            size += s.len() + 2 + quote_count + slash_count;
+            // "?"=>2. Skip per-byte escape counting — the estimate is for
+            // size tracking, not exact serialization.
+            size += s.len() + 2;
         }
         Value::Number(n) => {
-            size += n.to_string().len();
+            // Avoid allocating a String to measure digit count.
+            // Estimate the serialized length directly.
+            if let Some(v) = n.as_u64() {
+                size += count_digits_u64(v);
+            } else if let Some(v) = n.as_i64() {
+                size += if v < 0 { 1 + count_digits_u64(v.unsigned_abs()) } else { count_digits_u64(v as u64) };
+            } else {
+                // f64 — fast estimate: sign(1) + digits(~17) + dot(1) = ~20 max
+                size += 20;
+            }
         }
         Value::Bool(b) => {
             // true for 4 bytes, false for 5 bytes

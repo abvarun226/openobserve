@@ -15,6 +15,12 @@
 
 #![feature(variant_count)]
 
+// Set global allocator in the library so all binaries linking against it
+// (including benchmarks) benefit from mimalloc's multi-threaded performance.
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(feature = "enterprise")]
 pub mod cipher;
 pub mod cli;

@@ -448,7 +448,7 @@ pub async fn ingest(
             });
             hour_buf
                 .records
-                .push(Arc::new(json::Value::Object(record.to_owned())));
+                .push(json::Value::Object(record.to_owned()));
             hour_buf.records_size += record_str.len();
 
             // update status

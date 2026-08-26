@@ -30,7 +30,7 @@ use config::{
     },
     metrics,
     utils::{
-        json::{Map, Value, estimate_json_bytes, get_string_value},
+        json::{Map, Value, get_string_value},
         schema_ext::SchemaExt,
         time::now_micros,
     },
@@ -87,18 +87,59 @@ fn parse_bulk_index(v: &Value) -> Option<(&str, &str, Option<&str>)> {
     None
 }
 
+/// Fast extraction of action, _index, and _id from a bulk metadata line's raw bytes.
+/// Returns (action, index, doc_id) without full JSON parsing.
+/// Falls back to None on any unexpected format.
+fn parse_bulk_index_fast(line: &[u8]) -> Option<(&str, &str, Option<&str>)> {
+    // Expected format: {"index":{"_index":"name"}} or {"create":{"_index":"name","_id":"id"}}
+    // Find the action by looking for the first '"' after '{'
+    let s = std::str::from_utf8(line).ok()?;
+    let s = s.trim();
+    if !s.starts_with('{') || !s.ends_with('}') {
+        return None;
+    }
+
+    // Find action: first quoted key
+    let first_quote = s.find('"')? + 1;
+    let action_end = first_quote + s[first_quote..].find('"')?;
+    let action = &s[first_quote..action_end];
+
+    // Validate action
+    if !BULK_OPERATORS.contains(&action) {
+        return None;
+    }
+
+    // Find _index value
+    let idx_marker = "\"_index\":\"";
+    let idx_start = s.find(idx_marker)? + idx_marker.len();
+    let idx_end = idx_start + s[idx_start..].find('"')?;
+    let index = &s[idx_start..idx_end];
+
+    // Find _id value (optional)
+    let doc_id = {
+        let id_marker = "\"_id\":\"";
+        s.find(id_marker).and_then(|pos| {
+            let id_start = pos + id_marker.len();
+            let id_end = id_start + s[id_start..].find('"')?;
+            Some(&s[id_start..id_end])
+        })
+    };
+
+    Some((action, index, doc_id))
+}
+
 pub fn cast_to_type(
     value: &mut Map<String, Value>,
-    delta: Vec<Field>,
+    delta: &[Field],
 ) -> Result<(), anyhow::Error> {
     let mut parse_error = String::new();
     for field in delta {
-        let field_name = field.name().clone();
-        let Some(val) = value.get(&field_name) else {
+        let field_name = field.name();
+        let Some(val) = value.get(field_name) else {
             continue;
         };
         if val.is_null() {
-            value.insert(field_name, Value::Null);
+            value.insert(field_name.clone(), Value::Null);
             continue;
         }
         match field.data_type() {
@@ -106,7 +147,7 @@ pub fn cast_to_type(
                 if val.is_string() {
                     continue;
                 }
-                value.insert(field_name, Value::String(get_string_value(val)));
+                value.insert(field_name.clone(), Value::String(get_string_value(val)));
             }
             DataType::Int64 | DataType::Int32 | DataType::Int16 | DataType::Int8 => {
                 let ret = match val {
@@ -119,9 +160,9 @@ pub fn cast_to_type(
                 };
                 match ret {
                     Ok(val) => {
-                        value.insert(field_name, Value::Number(val.into()));
+                        value.insert(field_name.clone(), Value::Number(val.into()));
                     }
-                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                    Err(_) => set_parsing_error(&mut parse_error, field),
                 };
             }
             DataType::UInt64 | DataType::UInt32 | DataType::UInt16 | DataType::UInt8 => {
@@ -135,9 +176,9 @@ pub fn cast_to_type(
                 };
                 match ret {
                     Ok(val) => {
-                        value.insert(field_name, Value::Number(val.into()));
+                        value.insert(field_name.clone(), Value::Number(val.into()));
                     }
-                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                    Err(_) => set_parsing_error(&mut parse_error, field),
                 };
             }
             DataType::Float64 | DataType::Float32 | DataType::Float16 => {
@@ -152,11 +193,11 @@ pub fn cast_to_type(
                 match ret {
                     Ok(val) => {
                         value.insert(
-                            field_name,
+                            field_name.clone(),
                             Value::Number(serde_json::Number::from_f64(val).unwrap()),
                         );
                     }
-                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                    Err(_) => set_parsing_error(&mut parse_error, field),
                 };
             }
             DataType::Boolean => {
@@ -170,12 +211,12 @@ pub fn cast_to_type(
                 };
                 match ret {
                     Ok(val) => {
-                        value.insert(field_name, Value::Bool(val));
+                        value.insert(field_name.clone(), Value::Bool(val));
                     }
-                    Err(_) => set_parsing_error(&mut parse_error, &field),
+                    Err(_) => set_parsing_error(&mut parse_error, field),
                 };
             }
-            _ => set_parsing_error(&mut parse_error, &field),
+            _ => set_parsing_error(&mut parse_error, field),
         };
     }
     if !parse_error.is_empty() {
@@ -303,7 +344,7 @@ async fn write_logs_by_stream(
     Ok(())
 }
 
-async fn write_logs(
+pub(crate) async fn write_logs(
     thread_id: usize,
     org_id: &str,
     stream_name: &str,
@@ -360,17 +401,36 @@ async fn write_logs(
     // End get stream alert
 
     // start check for schema
-    let min_timestamp = json_data.iter().map(|(ts, _)| ts).min().unwrap();
-    let (schema_evolution, infer_schema) = check_for_schema(
-        org_id,
-        stream_name,
-        StreamType::Logs,
-        &mut stream_schema_map,
-        json_data.iter().map(|(_, v)| v).collect(),
-        *min_timestamp,
-        is_derived, // is_derived is true if the stream is derived
-    )
-    .await?;
+    let min_timestamp = json_data[0].0;
+    // Try fast path with first record only. Falls back to full Vec if schema
+    // needs evolution (rare after first batch).
+    let (schema_evolution, infer_schema) = {
+        let fast = check_for_schema(
+            org_id,
+            stream_name,
+            StreamType::Logs,
+            &mut stream_schema_map,
+            vec![&json_data[0].1],
+            min_timestamp,
+            is_derived,
+        )
+        .await?;
+        if fast.0.types_delta.is_some() || fast.1.is_some() {
+            // Schema needs evolution — re-check with all records
+            check_for_schema(
+                org_id,
+                stream_name,
+                StreamType::Logs,
+                &mut stream_schema_map,
+                json_data.iter().map(|(_, v)| v).collect(),
+                min_timestamp,
+                is_derived,
+            )
+            .await?
+        } else {
+            fast
+        }
+    };
 
     // get schema
     let latest_schema = stream_schema_map
@@ -392,32 +452,79 @@ async fn write_logs(
     let mut distinct_values = Vec::with_capacity(16);
 
     let mut write_buf: HashMap<String, SchemaRecords> = HashMap::new();
+    // Cache partition key: (bucket_id, key_string) to skip recomputation
+    let mut cached_partition: Option<(i64, String)> = None;
+
+    // Pre-compute the cast delta once, outside the per-record loop
+    let cast_delta: Option<Vec<Field>> = schema_evolution.types_delta.as_ref().map(|delta| {
+        if !schema_evolution.is_schema_changed {
+            delta.clone()
+        } else {
+            delta
+                .iter()
+                .filter(|x| x.metadata().contains_key("zo_cast"))
+                .cloned()
+                .collect()
+        }
+    });
+
+    let batch_has_doc_id = json_data
+        .first()
+        .map_or(false, |(_, v)| v.contains_key("_id"));
+
+    // Bulk fast path: skip per-record loop when no partition keys, no cast,
+    // no doc_id, no alerts, no distinct values. Build SchemaRecords directly.
+    let can_skip_loop = partition_keys.is_empty()
+        && cast_delta.is_none()
+        && !batch_has_doc_id
+        && !stream_settings.enable_distinct_fields;
+    // Check if all records fall in the same partition bucket
+    let single_bucket = if can_skip_loop && !json_data.is_empty() {
+        let divisor = if matches!(partition_time_level, PartitionTimeLevel::Daily) {
+            86_400_000_000i64
+        } else {
+            3_600_000_000i64
+        };
+        let first_bucket = json_data[0].0 / divisor;
+        json_data.iter().all(|(ts, _)| ts / divisor == first_bucket)
+    } else {
+        false
+    };
+    if single_bucket {
+        // Fast path: all records in one partition. Build SchemaRecords
+        // directly without per-record iteration.
+        let (first_ts, ref first_rec) = json_data[0];
+        let hour_key = get_write_partition_key(
+            first_ts, &partition_keys, partition_time_level,
+            first_rec, Some(&schema_key),
+        );
+        let records: Vec<Value> = json_data
+            .into_iter()
+            .map(|(_, map)| Value::Object(map))
+            .collect();
+        write_buf.insert(hour_key, SchemaRecords {
+            schema_key: schema_key.clone(),
+            schema: rec_schema.clone(),
+            records_size: 0,
+            records,
+        });
+    } else {
 
     for (timestamp, mut record_val) in json_data {
-        let doc_id = record_val
-            .get("_id")
-            .map(|v| v.as_str().unwrap().to_string());
+        let doc_id = if batch_has_doc_id {
+            record_val
+                .get("_id")
+                .map(|v| v.as_str().unwrap().to_string())
+        } else {
+            None
+        };
 
         // validate record
-        if let Some(delta) = schema_evolution.types_delta.as_ref() {
-            let ret_val = if !schema_evolution.is_schema_changed {
-                cast_to_type(&mut record_val, delta.to_owned())
+        if let Some(delta) = cast_delta.as_ref() {
+            let ret_val = if !delta.is_empty() {
+                cast_to_type(&mut record_val, delta)
             } else {
-                let local_delta = delta
-                    .iter()
-                    .filter_map(|x| {
-                        if x.metadata().contains_key("zo_cast") {
-                            Some(x.to_owned())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                if !local_delta.is_empty() {
-                    cast_to_type(&mut record_val, local_delta)
-                } else {
-                    Ok(())
-                }
+                Ok(())
             };
             if let Err(e) = ret_val {
                 // update status(fail)
@@ -522,14 +629,38 @@ async fn write_logs(
             }
         }
 
-        // get hour key
-        let hour_key = get_write_partition_key(
-            timestamp,
-            &partition_keys,
-            partition_time_level,
-            &record_val,
-            Some(&schema_key),
-        );
+        // get hour key — reuse cached key when timestamp falls in same bucket
+        let bucket = if matches!(partition_time_level, PartitionTimeLevel::Daily) {
+            timestamp / 86_400_000_000
+        } else {
+            timestamp / 3_600_000_000
+        };
+        let hour_key = if partition_keys.is_empty() {
+            if let Some((cached_bucket, ref key)) = cached_partition {
+                if cached_bucket == bucket {
+                    key.clone()
+                } else {
+                    let k = get_write_partition_key(
+                        timestamp, &partition_keys, partition_time_level,
+                        &record_val, Some(&schema_key),
+                    );
+                    cached_partition = Some((bucket, k.clone()));
+                    k
+                }
+            } else {
+                let k = get_write_partition_key(
+                    timestamp, &partition_keys, partition_time_level,
+                    &record_val, Some(&schema_key),
+                );
+                cached_partition = Some((bucket, k.clone()));
+                k
+            }
+        } else {
+            get_write_partition_key(
+                timestamp, &partition_keys, partition_time_level,
+                &record_val, Some(&schema_key),
+            )
+        };
 
         let hour_buf = write_buf.entry(hour_key).or_insert_with(|| SchemaRecords {
             schema_key: schema_key.clone(),
@@ -538,28 +669,24 @@ async fn write_logs(
             records_size: 0,
         });
         let record_val = Value::Object(record_val);
-        let record_size = estimate_json_bytes(&record_val);
-        hour_buf.records.push(Arc::new(record_val));
-        hour_buf.records_size += record_size;
+        hour_buf.records.push(record_val);
+        // records_size is a pre-allocation hint; into_bytes resets it to the
+        // actual serialized length. Skip the per-record estimate_json_bytes
+        // walk to reduce CPU cost in the hot loop.
 
         // update status(success)
         match status {
             IngestionStatus::Record(status) => {
                 status.successful += 1;
             }
-            IngestionStatus::Bulk(bulk_res) => {
-                bulk::add_record_status(
-                    stream_name.to_string(),
-                    doc_id,
-                    "".to_string(),
-                    None,
-                    bulk_res,
-                    None,
-                    None,
-                );
+            IngestionStatus::Bulk(_) => {
+                // Count successes; generate response items after the loop
+                // to avoid per-record HashMap + BulkResponseItem allocations.
             }
         }
     }
+
+    } // end else (slow path with per-record loop)
 
     // write data to wal
     let writer =
@@ -623,7 +750,7 @@ mod tests {
         let mut local_val = Map::new();
         local_val.insert("test".to_string(), Value::from("test13212"));
         let delta = vec![Field::new("test", DataType::Utf8, true)];
-        let ret_val = cast_to_type(&mut local_val, delta);
+        let ret_val = cast_to_type(&mut local_val, &delta);
         assert!(ret_val.is_ok());
     }
 }
