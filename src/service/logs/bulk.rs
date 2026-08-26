@@ -19,7 +19,7 @@ use actix_web::web;
 use rayon::prelude::*;
 use config::{
     BLOCKED_STREAMS, TIMESTAMP_COL_NAME, get_config,
-    meta::stream::StreamType,
+    meta::stream::{StreamParams, StreamType},
     metrics,
     utils::{
         json,
@@ -326,60 +326,114 @@ pub async fn ingest(
                 );
             }
             ParsedRecord::ParseError => {
-                bulk_res.errors = true;
+                return Err(infra::errors::Error::Message(
+                    "Failed to parse JSON data line".to_string(),
+                ));
             }
         }
     }
 
-    // Bypass ingest.rs per-record loop: call write_logs directly with
-    // pre-parsed (timestamp, Map) tuples. Saves one full iteration over
-    // 10k records + Value::Object destructure/reconstruct round-trip.
+    // Route each stream through ingest.rs (pipeline path) or write_logs (direct path).
     for (stream_name, records) in streams_data {
-        let _record_count = records.len();
-        // Temporarily move bulk_res into IngestionStatus for write_logs
-        let mut ing_status = crate::common::meta::ingestion::IngestionStatus::Bulk(
-            std::mem::take(&mut bulk_res)
-        );
-        match super::write_logs(
-            thread_id,
-            org_id,
-            &stream_name,
-            &mut ing_status,
-            records,
-            false,
+        let stream_param = StreamParams::new(org_id, &stream_name, stream_type);
+        let has_pipeline = crate::service::ingestion::get_stream_executable_pipeline(
+            &stream_param,
         )
         .await
-        {
-            Ok(_req_stats) => {
-                // Move bulk_res back from IngestionStatus
-                if let crate::common::meta::ingestion::IngestionStatus::Bulk(br) = ing_status {
-                    bulk_res = br;
+        .is_some();
+
+        if has_pipeline {
+            // Pipeline-enabled: convert to Vec<json::Value> and route through ingest.rs
+            let json_values: Vec<json::Value> = records
+                .into_iter()
+                .map(|(_, map)| json::Value::Object(map))
+                .collect();
+            match super::ingest::ingest(
+                thread_id,
+                org_id,
+                &stream_name,
+                IngestionRequest::JsonValues(IngestionValueType::Bulk, json_values),
+                user.clone(),
+                None,
+                false,
+            )
+            .await
+            {
+                Ok(v) => {
+                    for status in v.status {
+                        bulk_res.items.extend(status.items);
+                    }
+                }
+                Err(e) => {
+                    log::error!(
+                        "[LOGS:BULK] stream {org_id}/logs/{stream_name}: Ingestion error: {e}"
+                    );
+                    bulk_res.errors = true;
+                    metrics::INGEST_ERRORS
+                        .with_label_values(&[
+                            org_id,
+                            StreamType::Logs.as_str(),
+                            &stream_name,
+                            PIPELINE_EXEC_FAILED,
+                        ])
+                        .inc();
+                    add_record_status(
+                        stream_name.to_string(),
+                        None,
+                        action.to_string(),
+                        None,
+                        &mut bulk_res,
+                        Some(PIPELINE_EXEC_FAILED.to_string()),
+                        Some(PIPELINE_EXEC_FAILED.to_string()),
+                    );
                 }
             }
-            Err(e) => {
-                // Move bulk_res back from IngestionStatus
-                if let crate::common::meta::ingestion::IngestionStatus::Bulk(br) = ing_status {
-                    bulk_res = br;
+        } else {
+            // No pipeline: direct write_logs path (optimized)
+            let mut ing_status = crate::common::meta::ingestion::IngestionStatus::Bulk(
+                std::mem::take(&mut bulk_res),
+            );
+            match super::write_logs(
+                thread_id,
+                org_id,
+                &stream_name,
+                &mut ing_status,
+                records,
+                false,
+            )
+            .await
+            {
+                Ok(_req_stats) => {
+                    if let crate::common::meta::ingestion::IngestionStatus::Bulk(br) = ing_status {
+                        bulk_res = br;
+                    }
                 }
-                log::error!("[LOGS:BULK] stream {org_id}/logs/{stream_name}: Ingestion error: {e}");
-                bulk_res.errors = true;
-                metrics::INGEST_ERRORS
-                    .with_label_values(&[
-                        org_id,
-                        StreamType::Logs.as_str(),
-                        &stream_name,
-                        TRANSFORM_FAILED,
-                    ])
-                    .inc();
-                add_record_status(
-                    stream_name.to_string(),
-                    None,
-                    action.to_string(),
-                    None,
-                    &mut bulk_res,
-                    Some(PIPELINE_EXEC_FAILED.to_string()),
-                    Some(PIPELINE_EXEC_FAILED.to_string()),
-                );
+                Err(e) => {
+                    if let crate::common::meta::ingestion::IngestionStatus::Bulk(br) = ing_status {
+                        bulk_res = br;
+                    }
+                    log::error!(
+                        "[LOGS:BULK] stream {org_id}/logs/{stream_name}: Ingestion error: {e}"
+                    );
+                    bulk_res.errors = true;
+                    metrics::INGEST_ERRORS
+                        .with_label_values(&[
+                            org_id,
+                            StreamType::Logs.as_str(),
+                            &stream_name,
+                            TRANSFORM_FAILED,
+                        ])
+                        .inc();
+                    add_record_status(
+                        stream_name.to_string(),
+                        None,
+                        action.to_string(),
+                        None,
+                        &mut bulk_res,
+                        Some(PIPELINE_EXEC_FAILED.to_string()),
+                        Some(PIPELINE_EXEC_FAILED.to_string()),
+                    );
+                }
             }
         }
     }

@@ -502,12 +502,32 @@ pub(crate) async fn write_logs(
             .into_iter()
             .map(|(_, map)| Value::Object(map))
             .collect();
+        let record_count = records.len();
         write_buf.insert(hour_key, SchemaRecords {
             schema_key: schema_key.clone(),
             schema: rec_schema.clone(),
             records_size: 0,
             records,
         });
+        // Generate bulk response success items for the fast path.
+        match status {
+            IngestionStatus::Record(status) => {
+                status.successful += record_count as u32;
+            }
+            IngestionStatus::Bulk(bulk_res) => {
+                for _ in 0..record_count {
+                    bulk::add_record_status(
+                        stream_name.to_string(),
+                        None,
+                        "".to_string(),
+                        None,
+                        bulk_res,
+                        None,
+                        None,
+                    );
+                }
+            }
+        }
     } else {
 
     for (timestamp, mut record_val) in json_data {
@@ -679,9 +699,16 @@ pub(crate) async fn write_logs(
             IngestionStatus::Record(status) => {
                 status.successful += 1;
             }
-            IngestionStatus::Bulk(_) => {
-                // Count successes; generate response items after the loop
-                // to avoid per-record HashMap + BulkResponseItem allocations.
+            IngestionStatus::Bulk(bulk_res) => {
+                bulk::add_record_status(
+                    stream_name.to_string(),
+                    doc_id,
+                    "".to_string(),
+                    None,
+                    bulk_res,
+                    None,
+                    None,
+                );
             }
         }
     }
