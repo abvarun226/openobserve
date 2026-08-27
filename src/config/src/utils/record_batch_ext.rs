@@ -959,6 +959,7 @@ fn convert_json_to_record_batch_inner(
     // Build a direct-index mapping from the first record's key order.
     let mut key_order_indices: Vec<usize> = Vec::new();
     let mut first_record_len: usize = 0;
+    let mut first_keys: Vec<&str> = Vec::new();
     let mut field_present = vec![false; num_fields];
 
     // Process first record to build the key-order index
@@ -966,7 +967,9 @@ fn convert_json_to_record_batch_inner(
         if let Some(obj) = first.as_object() {
             first_record_len = obj.len();
             key_order_indices.reserve(first_record_len);
+            first_keys.reserve(first_record_len);
             for (key, value) in obj.iter() {
+                first_keys.push(key.as_str());
                 if let Some(&idx) = field_indices.get(key.as_str()) {
                     key_order_indices.push(idx);
                     field_present[idx] = true;
@@ -998,29 +1001,26 @@ fn convert_json_to_record_batch_inner(
             }
         };
 
-        if obj.len() == first_record_len && first_covers_all {
-            // Fast path: all fields present, skip null tracking
+        // Positional fast path: only safe when keys match the first record
+        // in both identity and order.
+        let keys_match = obj.len() == first_record_len
+            && first_covers_all
+            && obj.keys().zip(first_keys.iter()).all(|(k, &fk)| k == fk);
+
+        if keys_match {
             for ((_key, value), &idx) in obj.iter().zip(key_order_indices.iter()) {
                 append_value_optimized(&mut builders[idx], data_types[idx], value)?;
             }
-            continue; // skip null-fill loop
-        } else if obj.len() == first_record_len {
-            // Same field count but not all schema fields covered
-            for ((_key, value), &idx) in obj.iter().zip(key_order_indices.iter()) {
-                if idx != usize::MAX {
-                    field_present[idx] = true;
-                    append_value_optimized(&mut builders[idx], data_types[idx], value)?;
-                }
-            }
-        } else {
-            for (key, value) in obj.iter() {
-                if let Some(&idx) = field_indices.get(key.as_str()) {
-                    field_present[idx] = true;
-                    append_value_optimized(&mut builders[idx], data_types[idx], value)?;
-                }
-            }
+            continue;
         }
 
+        // Key-based lookup for all other records
+        for (key, value) in obj.iter() {
+            if let Some(&idx) = field_indices.get(key.as_str()) {
+                field_present[idx] = true;
+                append_value_optimized(&mut builders[idx], data_types[idx], value)?;
+            }
+        }
         for (idx, present) in field_present.iter_mut().enumerate() {
             if !*present {
                 append_null_optimized(&mut builders[idx], data_types[idx]);
@@ -1906,21 +1906,21 @@ mod test {
         ]));
 
         let data = vec![
-            Arc::new(serde_json::json!({
+            serde_json::json!({
                 "name": "Alice",
                 "age": 25,
                 "city": "New York"
-            })),
-            Arc::new(serde_json::json!({
+            }),
+            serde_json::json!({
                 "name": "Bob",
                 "age": 30,
                 "city": "London"
-            })),
-            Arc::new(serde_json::json!({
+            }),
+            serde_json::json!({
                 "name": "Charlie",
                 "age": 35
                 // city is missing, should be null
-            })),
+            }),
         ];
 
         let record_batch = convert_json_to_record_batch(&schema, &data).unwrap();
@@ -1957,5 +1957,129 @@ mod test {
         assert_eq!(city_array.value(0), "New York");
         assert_eq!(city_array.value(1), "London");
         assert!(city_array.is_null(2)); // Charlie's city should be null
+    }
+
+    // --- convert_json heterogeneous-key correctness tests ---
+
+    /// Same field count, different keys: positional path must NOT fire.
+    /// Record 1: {a:1, b:2}, Record 2: {a:3, c:4}
+    /// Expected row 2: a=3, b=null, c=4
+    #[test]
+    fn test_convert_json_heterogeneous_keys_same_count() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+            Field::new("c", DataType::Int64, true),
+        ]));
+
+        let data = vec![
+            serde_json::json!({"a": 1, "b": 2}),
+            serde_json::json!({"a": 3, "c": 4}),
+        ];
+
+        let batch = convert_json_to_record_batch(&schema, &data).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        let col_a = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_b = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_c = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+
+        // Row 0
+        assert_eq!(col_a.value(0), 1);
+        assert_eq!(col_b.value(0), 2);
+        assert!(col_c.is_null(0));
+
+        // Row 1: a=3, b=null, c=4
+        assert_eq!(col_a.value(1), 3);
+        assert!(col_b.is_null(1));
+        assert_eq!(col_c.value(1), 4);
+    }
+
+    /// Same keys, different iteration order: must use key lookup, not positional.
+    /// Record 1: {a:1, b:2}, Record 2: {b:3, a:4}
+    /// Expected row 2: a=4, b=3
+    #[test]
+    fn test_convert_json_same_keys_different_order() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+        ]));
+
+        let data = vec![
+            serde_json::json!({"a": 1, "b": 2}),
+            serde_json::json!({"b": 3, "a": 4}),
+        ];
+
+        let batch = convert_json_to_record_batch(&schema, &data).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        let col_a = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_b = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+
+        assert_eq!(col_a.value(0), 1);
+        assert_eq!(col_b.value(0), 2);
+        assert_eq!(col_a.value(1), 4);
+        assert_eq!(col_b.value(1), 3);
+    }
+
+    /// Homogeneous records (identical keys, identical order) still use the
+    /// positional fast path and produce correct output.
+    #[test]
+    fn test_convert_json_homogeneous_fast_path() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, true),
+            Field::new("y", DataType::Utf8, true),
+        ]));
+
+        let data = vec![
+            serde_json::json!({"x": 10, "y": "hello"}),
+            serde_json::json!({"x": 20, "y": "world"}),
+            serde_json::json!({"x": 30, "y": "!"}),
+        ];
+
+        let batch = convert_json_to_record_batch(&schema, &data).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+
+        let col_x = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_y = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+
+        assert_eq!(col_x.value(0), 10);
+        assert_eq!(col_x.value(1), 20);
+        assert_eq!(col_x.value(2), 30);
+        assert_eq!(col_y.value(0), "hello");
+        assert_eq!(col_y.value(1), "world");
+        assert_eq!(col_y.value(2), "!");
+    }
+
+    /// Sparse / optional records: second record has fewer keys than the first.
+    /// Record 1: {a:1, b:2, c:3}, Record 2: {a:4}
+    /// Expected row 2: a=4, b=null, c=null
+    #[test]
+    fn test_convert_json_sparse_optional_fields() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+            Field::new("c", DataType::Int64, true),
+        ]));
+
+        let data = vec![
+            serde_json::json!({"a": 1, "b": 2, "c": 3}),
+            serde_json::json!({"a": 4}),
+        ];
+
+        let batch = convert_json_to_record_batch(&schema, &data).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        let col_a = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_b = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_c = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+
+        assert_eq!(col_a.value(0), 1);
+        assert_eq!(col_b.value(0), 2);
+        assert_eq!(col_c.value(0), 3);
+
+        assert_eq!(col_a.value(1), 4);
+        assert!(col_b.is_null(1));
+        assert!(col_c.is_null(1));
     }
 }
