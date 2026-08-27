@@ -402,35 +402,16 @@ pub(crate) async fn write_logs(
 
     // start check for schema
     let min_timestamp = json_data[0].0;
-    // Try fast path with first record only. Falls back to full Vec if schema
-    // needs evolution (rare after first batch).
-    let (schema_evolution, infer_schema) = {
-        let fast = check_for_schema(
-            org_id,
-            stream_name,
-            StreamType::Logs,
-            &mut stream_schema_map,
-            vec![&json_data[0].1],
-            min_timestamp,
-            is_derived,
-        )
-        .await?;
-        if fast.0.types_delta.is_some() || fast.1.is_some() {
-            // Schema needs evolution — re-check with all records
-            check_for_schema(
-                org_id,
-                stream_name,
-                StreamType::Logs,
-                &mut stream_schema_map,
-                json_data.iter().map(|(_, v)| v).collect(),
-                min_timestamp,
-                is_derived,
-            )
-            .await?
-        } else {
-            fast
-        }
-    };
+    let (schema_evolution, infer_schema) = check_for_schema(
+        org_id,
+        stream_name,
+        StreamType::Logs,
+        &mut stream_schema_map,
+        json_data.iter().map(|(_, v)| v).collect(),
+        min_timestamp,
+        is_derived,
+    )
+    .await?;
 
     // get schema
     let latest_schema = stream_schema_map

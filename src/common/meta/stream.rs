@@ -224,9 +224,9 @@ mod tests {
             false,
         )]));
 
-        let records = vec![Arc::new(json::json!({
+        let records = vec![json::json!({
             "field1": "value1"
-        }))];
+        })];
 
         let schema_records = SchemaRecords {
             schema_key: "test_key".to_string(),

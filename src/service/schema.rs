@@ -81,9 +81,7 @@ fn schema_covers_records(schema: &SchemaCache, records: &[&Map<String, Value>]) 
     let fields_map = schema.fields_map();
     let schema_ref = schema.schema();
     let schema_fields = schema_ref.fields();
-    // ponytail: check first record only — all records in a structured log
-    // batch share the same fields. Check all records if schemas ever diverge.
-    for record in records.iter().take(1) {
+    for record in records.iter() {
         for (key, value) in record.iter() {
             let Some(&idx) = fields_map.get(key) else {
                 return false; // new field not in schema
@@ -741,6 +739,63 @@ mod tests {
         .await
         .unwrap();
         assert!(!result.is_schema_changed);
+    }
+
+    #[test]
+    fn test_schema_covers_records_later_record_new_field() {
+        let schema = Schema::new(vec![
+            Field::new("Year", DataType::Int64, false),
+            Field::new("City", DataType::Utf8, false),
+        ]);
+        let cache = SchemaCache::new(schema);
+
+        let r1: serde_json::Value =
+            serde_json::from_str(r#"{"Year": 1896, "City": "Athens"}"#).unwrap();
+        let r2: serde_json::Value =
+            serde_json::from_str(r#"{"Year": 1900, "City": "Paris", "Sport": "Fencing"}"#)
+                .unwrap();
+        let records: Vec<&Map<String, Value>> =
+            vec![r1.as_object().unwrap(), r2.as_object().unwrap()];
+
+        // Second record adds "Sport" — must return false.
+        assert!(!schema_covers_records(&cache, &records));
+    }
+
+    #[test]
+    fn test_schema_covers_records_later_record_incompatible_type() {
+        let schema = Schema::new(vec![
+            Field::new("Year", DataType::Int64, false),
+            Field::new("City", DataType::Utf8, false),
+        ]);
+        let cache = SchemaCache::new(schema);
+
+        let r1: serde_json::Value =
+            serde_json::from_str(r#"{"Year": 1896, "City": "Athens"}"#).unwrap();
+        let r2: serde_json::Value =
+            serde_json::from_str(r#"{"Year": "nineteen hundred", "City": "Paris"}"#).unwrap();
+        let records: Vec<&Map<String, Value>> =
+            vec![r1.as_object().unwrap(), r2.as_object().unwrap()];
+
+        // Second record has Year as string vs Int64 — must return false.
+        assert!(!schema_covers_records(&cache, &records));
+    }
+
+    #[test]
+    fn test_schema_covers_records_all_conform() {
+        let schema = Schema::new(vec![
+            Field::new("Year", DataType::Int64, false),
+            Field::new("City", DataType::Utf8, false),
+        ]);
+        let cache = SchemaCache::new(schema);
+
+        let r1: serde_json::Value =
+            serde_json::from_str(r#"{"Year": 1896, "City": "Athens"}"#).unwrap();
+        let r2: serde_json::Value =
+            serde_json::from_str(r#"{"Year": 1900, "City": "Paris"}"#).unwrap();
+        let records: Vec<&Map<String, Value>> =
+            vec![r1.as_object().unwrap(), r2.as_object().unwrap()];
+
+        assert!(schema_covers_records(&cache, &records));
     }
 
     #[tokio::test]
