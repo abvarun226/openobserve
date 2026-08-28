@@ -415,6 +415,9 @@ pub async fn ingest(
                     }
                 }
             }
+            if flat_records.is_empty() {
+                continue;
+            }
             let mut ing_status = crate::common::meta::ingestion::IngestionStatus::Bulk(
                 std::mem::take(&mut bulk_res),
             );
