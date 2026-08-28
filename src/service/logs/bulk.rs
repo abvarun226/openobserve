@@ -121,10 +121,19 @@ pub async fn ingest(
                 next_line_is_data = true;
                 continue;
             }
-            // Fast-parse metadata line from raw bytes
-            let parsed = super::parse_bulk_index_fast(line);
-            let Some((line_action, line_stream_name, line_doc_id)) = parsed else {
-                // Fall back to full parse on unexpected format
+            // Fast-parse metadata line from raw bytes.
+            if let Some((line_action, line_stream_name, line_doc_id)) =
+                super::parse_bulk_index_fast(line)
+            {
+                if line_action != action {
+                    action = line_action.to_string();
+                }
+                if line_stream_name != stream_name {
+                    stream_name = line_stream_name.to_string();
+                }
+                doc_id = line_doc_id.map(|id| id.to_string());
+            } else {
+                // Fall back to full parsing for valid, non-fast-path metadata.
                 let value: json::Value = json::from_slice(line)?;
                 let Some((line_action, line_stream_name, line_doc_id)) =
                     super::parse_bulk_index(&value)
@@ -138,16 +147,7 @@ pub async fn ingest(
                     stream_name = line_stream_name.to_string();
                 }
                 doc_id = line_doc_id.map(|id| id.to_string());
-                next_line_is_data = true;
-                continue;
-            };
-            if line_action != action {
-                action = line_action.to_string();
             }
-            if line_stream_name != stream_name {
-                stream_name = line_stream_name.to_string();
-            }
-            doc_id = line_doc_id.map(|id| id.to_string());
 
             if stream_name.is_empty() || stream_name == "_" || stream_name == "/" {
                 let err_msg = format!("Invalid stream name: {}", String::from_utf8_lossy(line));
