@@ -22,11 +22,12 @@ use config::{
     meta::stream::{StreamParams, StreamType},
     metrics,
     utils::{
+        flatten,
         json,
         time::{now_micros, parse_timestamp_micro_from_value},
     },
 };
-use infra::errors::Result;
+use infra::{errors::Result, schema::get_flatten_level};
 
 use crate::{
     common::meta::ingestion::{
@@ -390,6 +391,30 @@ pub async fn ingest(
             }
         } else {
             // No pipeline: direct write_logs path (optimized)
+            // Flatten nested objects/arrays before schema inference, matching
+            // the behavior of the ingest.rs normal path.
+            let flatten_level = get_flatten_level(org_id, &stream_name, stream_type).await;
+            let mut flat_records = Vec::with_capacity(records.len());
+            for (ts, map) in records {
+                match flatten::flatten_with_level(json::Value::Object(map), flatten_level) {
+                    Ok(json::Value::Object(flat_map)) => flat_records.push((ts, flat_map)),
+                    Ok(_) => unreachable!(),
+                    Err(e) => {
+                        log::error!("[LOGS:BULK] flatten error: {e}");
+                        bulk_res.errors = true;
+                        add_record_status(
+                            stream_name.to_string(),
+                            None,
+                            action.to_string(),
+                            None,
+                            &mut bulk_res,
+                            Some(TRANSFORM_FAILED.to_string()),
+                            Some(e.to_string()),
+                        );
+                        continue;
+                    }
+                }
+            }
             let mut ing_status = crate::common::meta::ingestion::IngestionStatus::Bulk(
                 std::mem::take(&mut bulk_res),
             );
@@ -398,7 +423,7 @@ pub async fn ingest(
                 org_id,
                 &stream_name,
                 &mut ing_status,
-                records,
+                flat_records,
                 false,
             )
             .await
