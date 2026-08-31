@@ -449,9 +449,10 @@ pub(crate) async fn write_logs(
         }
     });
 
-    let batch_has_doc_id = json_data
-        .first()
-        .map_or(false, |(_, v)| v.contains_key("_id"));
+    let batch_has_doc_id = !cfg.common.bulk_api_response_errors_only
+        && json_data
+            .iter()
+            .any(|(_, record)| record.contains_key("_id"));
 
     // Bulk fast path: skip per-record loop when no partition keys, no cast,
     // no doc_id, no alerts, no distinct values. Build SchemaRecords directly.
