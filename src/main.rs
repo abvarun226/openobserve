@@ -105,9 +105,6 @@ use {
     utoipa::OpenApi,
 };
 
-#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

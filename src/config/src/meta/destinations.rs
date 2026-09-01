@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::fmt;
+use std::{borrow::Borrow, fmt};
 
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
@@ -151,7 +151,7 @@ impl HTTPOutputFormat {
         }
     }
 
-    pub fn get_body_from_data<T: AsRef<Value> + Serialize>(
+    pub fn get_body_from_data<T: Borrow<Value>>(
         &self,
         data: &[T],
         metadata: &HashMap<String, String>,
@@ -159,7 +159,7 @@ impl HTTPOutputFormat {
         let data = data
             .iter()
             .map(|val| {
-                let mut t = val.as_ref().clone();
+                let mut t = val.borrow().clone();
                 if let Some(obj) = t.as_object_mut() {
                     for (k, v) in metadata.iter() {
                         obj.insert(k.clone(), Value::String(v.clone()));

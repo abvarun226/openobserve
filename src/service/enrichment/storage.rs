@@ -168,8 +168,6 @@ impl Values {
 }
 
 pub mod remote {
-    use std::sync::Arc;
-
     use chrono::{Datelike, Timelike};
     use config::{
         meta::stream::{FileMeta, StreamType},
