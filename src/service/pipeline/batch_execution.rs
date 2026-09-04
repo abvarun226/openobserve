@@ -117,7 +117,7 @@ impl BatchBuffer {
     fn take_records(&mut self) -> Vec<json::Value> {
         self.last_write = Instant::now();
         self.total_bytes = 0;
-        std::mem::take(&mut self.records)
+        std::mem::replace(&mut self.records, Vec::with_capacity(50))
     }
 }
 
