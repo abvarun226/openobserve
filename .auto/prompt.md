@@ -52,6 +52,7 @@ Read-only supporting code:
 4. Reuse the existing bulk write fast path for nested-pipeline-free destination streams only when black-box output remains equivalent.
 
 ## What has been tried
+- `flush_all_buffers`: moved remote WAL writes outside the global `BATCH_BUFFERS` mutex. The candidate's latency median regressed from 81.541 ms to 82.410 ms, with remote delivery latency also worse. Discarded.
 - The earlier bulk-ingest optimizations improve the direct path but bypass realtime pipelines.
 - The canary has idle CPU, disk, and WAL locks, while `_bulk` mean latency and pipeline execution time are both about five seconds.
 - The current RemoteStream buffer uses 50 records, 32 KiB, or a hardcoded five-second timeout. At roughly five records per second per destination, the timer dominates.
