@@ -1007,22 +1007,32 @@ async fn process_node(
                 records.len()
             );
             if !records.is_empty() {
-                // Group records by batch_key for routing to different remote streams
-                let mut records_by_batch_key: HashMap<String, Vec<json::Value>> = HashMap::new();
-
-                for record in records {
-                    // Extract batch_key from record, fallback to "default" if not present
-                    let batch_key = record
+                let batch_key = records[0]
+                    .get("batch_key")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("default");
+                let records_by_batch_key = if records.iter().all(|record| {
+                    record
                         .get("batch_key")
-                        .and_then(|v| v.as_str())
+                        .and_then(|value| value.as_str())
                         .unwrap_or("default")
-                        .to_string();
+                        == batch_key
+                }) {
+                    vec![(batch_key.to_string(), records)]
+                } else {
+                    let mut grouped_records: HashMap<String, Vec<json::Value>> = HashMap::new();
 
-                    records_by_batch_key
-                        .entry(batch_key)
-                        .or_default()
-                        .push(record);
-                }
+                    for record in records {
+                        let batch_key = record
+                            .get("batch_key")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("default")
+                            .to_string();
+                        grouped_records.entry(batch_key).or_default().push(record);
+                    }
+
+                    grouped_records.into_iter().collect::<Vec<_>>()
+                };
 
                 log::debug!(
                     "[Pipeline]: Grouped records into {} batch keys",
