@@ -65,7 +65,7 @@ struct BatchBuffer {
 impl BatchBuffer {
     fn new() -> Self {
         Self {
-            records: Vec::new(),
+            records: Vec::with_capacity(50),
             total_bytes: 0,
             last_write: Instant::now(),
         }
@@ -943,7 +943,7 @@ async fn process_node(
         }
         #[cfg(feature = "enterprise")]
         NodeData::RemoteStream(remote_stream) => {
-            let mut records = vec![];
+            let mut records = Vec::with_capacity(50);
             log::debug!(
                 "[Pipeline]: Destination node {node_idx} starts processing, remote_stream : {remote_stream:?}"
             );
