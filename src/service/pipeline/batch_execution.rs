@@ -1258,13 +1258,11 @@ async fn send_to_children(
         }
     } else {
         for child_sender in child_senders.iter_mut() {
-            if let Err(error) = child_sender.try_send(item.clone()) {
-                if let Err(send_err) = child_sender.send(error.into_inner()).await {
-                    log::error!(
-                        "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
-                    );
-                    break;
-                }
+            if let Err(send_err) = child_sender.send(item.clone()).await {
+                log::error!(
+                    "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
+                );
+                break;
             }
         }
     }
