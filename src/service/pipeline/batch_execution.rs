@@ -72,8 +72,13 @@ impl BatchBuffer {
     }
 
     fn add_records(&mut self, new_records: Vec<json::Value>) {
+        const MAX_BATCH_SIZE: usize = 50;
+        const MAX_BATCH_BYTES: usize = 32 * 1024;
+
         for record in new_records {
-            self.total_bytes += record.to_string().len();
+            if self.records.len() < MAX_BATCH_SIZE && self.total_bytes < MAX_BATCH_BYTES {
+                self.total_bytes += record.to_string().len();
+            }
             self.records.push(record);
         }
     }
