@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(feature = "enterprise")]
+use std::hash::{DefaultHasher, Hash, Hasher};
+#[cfg(feature = "enterprise")]
 use std::io::{self, Write};
 
 use anyhow::{Result, anyhow};
@@ -121,9 +123,18 @@ impl BatchBuffer {
     }
 }
 
+const BATCH_BUFFER_SHARDS: usize = 16;
+
 #[cfg(feature = "enterprise")]
-static BATCH_BUFFERS: Lazy<Mutex<HashMap<String, BatchBuffer>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static BATCH_BUFFERS: Lazy<[Mutex<HashMap<String, BatchBuffer>>; BATCH_BUFFER_SHARDS]> =
+    Lazy::new(|| std::array::from_fn(|_| Mutex::new(HashMap::new())));
+
+#[cfg(feature = "enterprise")]
+fn batch_buffer_shard(key: &str) -> &Mutex<HashMap<String, BatchBuffer>> {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    &BATCH_BUFFERS[hasher.finish() as usize % BATCH_BUFFER_SHARDS]
+}
 
 static DYNAMIC_STREAM_NAME_PATTERN: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"\{([^}]+)\}").unwrap());
@@ -1075,7 +1086,7 @@ async fn process_node(
                     );
 
                     // Add records to the accumulating buffer and check if we should flush
-                    let mut buffers = BATCH_BUFFERS.lock().await;
+                    let mut buffers = batch_buffer_shard(&buffer_key).lock().await;
                     let buffer = buffers
                         .entry(buffer_key.clone())
                         .or_insert_with(BatchBuffer::new);
@@ -1190,9 +1201,9 @@ async fn process_node(
 
 #[cfg(feature = "enterprise")]
 pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
-    let mut buffers = BATCH_BUFFERS.lock().await;
-
-    for (batch_key, buffer) in buffers.iter_mut() {
+    for buffers in BATCH_BUFFERS.iter() {
+        let mut buffers = buffers.lock().await;
+        for (batch_key, buffer) in buffers.iter_mut() {
         // let buffer_key = format!("{}:{}:{}:{}:{}", pipeline_id, remote_stream.org_id,
         // remote_stream.destination_name, batch_key, "remote");
         let key = batch_key.clone();
@@ -1261,8 +1272,8 @@ pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
                 }
             }
         }
+        }
     }
-    drop(buffers); // Release the lock before async operations
 
     Ok(())
 }
