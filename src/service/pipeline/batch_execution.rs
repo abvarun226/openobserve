@@ -17,6 +17,8 @@ use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
+#[cfg(feature = "enterprise")]
+use std::io::{self, Write};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -54,6 +56,22 @@ use crate::{
 
 // Global batch buffer for accumulating remote stream records
 #[cfg(feature = "enterprise")]
+#[derive(Default)]
+struct ByteCounter(usize);
+
+#[cfg(feature = "enterprise")]
+impl Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "enterprise")]
 #[derive(Debug)]
 struct BatchBuffer {
     records: Vec<json::Value>,
@@ -77,7 +95,10 @@ impl BatchBuffer {
 
         for record in new_records {
             if self.records.len() < MAX_BATCH_SIZE && self.total_bytes < MAX_BATCH_BYTES {
-                self.total_bytes += record.to_string().len();
+                let mut counter = ByteCounter::default();
+                serde_json::to_writer(&mut counter, &record)
+                    .expect("writing a JSON Value into ByteCounter cannot fail");
+                self.total_bytes += counter.0;
             }
             self.records.push(record);
         }
