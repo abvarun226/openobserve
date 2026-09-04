@@ -52,6 +52,7 @@ Read-only supporting code:
 4. Reuse the existing bulk write fast path for nested-pipeline-free destination streams only when black-box output remains equivalent.
 
 ## What has been tried
+- `send_to_children`: moved the final fan-out receiver out of the clone loop, eliminating one deep `PipelineItem` clone per fan-out. The candidate's latency median was 86.189 ms against the behavioral baseline's 85.345 ms. Discarded.
 - `flush_all_buffers`: moved remote WAL writes outside the global `BATCH_BUFFERS` mutex. The candidate's latency median regressed from 81.541 ms to 82.410 ms, with remote delivery latency also worse. Discarded.
 - The earlier bulk-ingest optimizations improve the direct path but bypass realtime pipelines.
 - The canary has idle CPU, disk, and WAL locks, while `_bulk` mean latency and pipeline execution time are both about five seconds.
