@@ -334,7 +334,9 @@ impl ExecutablePipeline {
             let error_sender_cp = error_sender.clone();
             let vrl_runtime: Option<(VRLResultResolver, bool)> = self.vrl_map.get(node_id).cloned();
             let pipeline_name = pipeline_name.clone();
-            let stream_name = stream_name.clone();
+            let stream_name = matches!(&node.node_data, NodeData::Function(_))
+                .then(|| stream_name.clone())
+                .flatten();
             let inv_id_cp = inv_id.to_string();
 
             // WARN: Do not change. Processing node can only be done in a task, as the internals of
