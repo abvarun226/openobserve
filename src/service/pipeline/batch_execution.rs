@@ -83,19 +83,23 @@ struct BatchBuffer {
 }
 
 #[cfg(feature = "enterprise")]
+const MAX_BATCH_SIZE: usize = 50;
+#[cfg(feature = "enterprise")]
+const MAX_BATCH_BYTES: usize = 32 * 1024;
+#[cfg(feature = "enterprise")]
+const MAX_BATCH_TIME_MS: u64 = 5000;
+
+#[cfg(feature = "enterprise")]
 impl BatchBuffer {
     fn new() -> Self {
         Self {
-            records: Vec::with_capacity(50),
+            records: Vec::with_capacity(MAX_BATCH_SIZE),
             total_bytes: 0,
             last_write: Instant::now(),
         }
     }
 
     fn add_records(&mut self, new_records: Vec<json::Value>) {
-        const MAX_BATCH_SIZE: usize = 50;
-        const MAX_BATCH_BYTES: usize = 32 * 1024;
-
         for record in new_records {
             if self.records.len() < MAX_BATCH_SIZE && self.total_bytes < MAX_BATCH_BYTES {
                 let mut counter = ByteCounter::default();
@@ -108,10 +112,6 @@ impl BatchBuffer {
     }
 
     fn should_flush(&self) -> bool {
-        const MAX_BATCH_SIZE: usize = 50; // Flush after 50 records
-        const MAX_BATCH_BYTES: usize = 32 * 1024; // Or 32KB
-        const MAX_BATCH_TIME_MS: u64 = 5000; // Or 5 seconds
-
         self.records.len() >= MAX_BATCH_SIZE
             || self.total_bytes >= MAX_BATCH_BYTES
             || self.last_write.elapsed() >= Duration::from_millis(MAX_BATCH_TIME_MS)
@@ -120,7 +120,7 @@ impl BatchBuffer {
     fn take_records(&mut self) -> Vec<json::Value> {
         self.last_write = Instant::now();
         self.total_bytes = 0;
-        std::mem::replace(&mut self.records, Vec::with_capacity(50))
+        std::mem::replace(&mut self.records, Vec::with_capacity(MAX_BATCH_SIZE))
     }
 }
 
@@ -1097,19 +1097,31 @@ async fn process_node(
                         .or_insert_with(BatchBuffer::new);
 
                     let initial_record_count = buffer.records.len();
-                    buffer.add_records(batch_records);
+                    let records_to_write = if initial_record_count == 0
+                        && batch_records.len() >= MAX_BATCH_SIZE
+                    {
+                        buffer.last_write = Instant::now();
+                        log::debug!(
+                            "[Pipeline]: Bypassing the empty buffer for batch_key '{batch_key}' - writing {} records directly to WAL",
+                            batch_records.len()
+                        );
+                        Some(batch_records)
+                    } else {
+                        buffer.add_records(batch_records);
 
-                    log::debug!(
-                        "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
-                        buffer.records.len() - initial_record_count,
-                        buffer.records.len(),
-                        buffer.total_bytes
-                    );
+                        log::debug!(
+                            "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
+                            buffer.records.len() - initial_record_count,
+                            buffer.records.len(),
+                            buffer.total_bytes
+                        );
+
+                        buffer.should_flush().then(|| buffer.take_records())
+                    };
+                    drop(buffers); // Release the lock before async operations
 
                     // Check if buffer should be flushed to WAL
-                    if buffer.should_flush() {
-                        let records_to_write = buffer.take_records();
-                        drop(buffers); // Release the lock before async operations
+                    if let Some(records_to_write) = records_to_write {
 
                         log::debug!(
                             "[Pipeline]: Flushing buffer for batch_key '{}' - writing {} records to WAL",

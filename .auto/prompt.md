@@ -52,6 +52,10 @@ Read-only supporting code:
 4. Reuse the existing bulk write fast path for nested-pipeline-free destination streams only when black-box output remains equivalent.
 
 ## What has been tried
+- `ExecutablePipeline::node_map` now stores immutable nodes in `Arc`. Each request clones 28 pointers instead of deep-cloning node metadata. This retained a 6.58% latency improvement, from 35.606 ms to 33.262 ms, with throughput flat at about 40,141 records/s.
+- The retained candidate's fresh black-box result is 59.15% lower client latency and 89.72% higher throughput than `branch-v0.40.0`. The benchmark oracle and healthy, retry, and restart checks pass.
+- Allocation-free source-size counting, shared VRL resolvers, shared task-label strings, borrowed request-local channel keys, and borrowed VRL context strings all regressed client latency.
+- Synchronous `try_send` source injection regressed both latency and throughput. Awaited source sends provide useful scheduling overlap.
 - `send_to_children`: moved the final fan-out receiver out of the clone loop, eliminating one deep `PipelineItem` clone per fan-out. The candidate's latency median was 86.189 ms against the behavioral baseline's 85.345 ms. Discarded.
 - `flush_all_buffers`: moved remote WAL writes outside the global `BATCH_BUFFERS` mutex. The candidate's latency median regressed from 81.541 ms to 82.410 ms, with remote delivery latency also worse. Discarded.
 - The earlier bulk-ingest optimizations improve the direct path but bypass realtime pipelines.
