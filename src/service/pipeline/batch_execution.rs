@@ -15,7 +15,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -1157,29 +1157,24 @@ async fn process_node(
 
                     // Add records to the accumulating buffer and check if we should flush
                     let mut buffers = batch_buffer_shard(&buffer_key).lock().await;
-                    let can_flush_directly = batch_records.len() >= MAX_BATCH_SIZE;
-                    let records_to_write = match buffers.entry(buffer_key) {
-                        Entry::Vacant(_) if can_flush_directly => Some(batch_records),
-                        Entry::Occupied(entry)
-                            if can_flush_directly && entry.get().records.is_empty() =>
-                        {
-                            entry.remove();
-                            Some(batch_records)
-                        }
-                        entry => {
-                            let buffer = entry.or_insert_with(BatchBuffer::new);
-                            let initial_record_count = buffer.records.len();
-                            buffer.add_records(batch_records);
+                    let buffer = buffers.entry(buffer_key).or_insert_with(BatchBuffer::new);
+                    let initial_record_count = buffer.records.len();
+                    let records_to_write = if initial_record_count == 0
+                        && batch_records.len() >= MAX_BATCH_SIZE
+                    {
+                        buffer.last_write = Instant::now();
+                        Some(batch_records)
+                    } else {
+                        buffer.add_records(batch_records);
 
-                            log::debug!(
-                                "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
-                                buffer.records.len() - initial_record_count,
-                                buffer.records.len(),
-                                buffer.total_bytes
-                            );
+                        log::debug!(
+                            "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
+                            buffer.records.len() - initial_record_count,
+                            buffer.records.len(),
+                            buffer.total_bytes
+                        );
 
-                            buffer.should_flush().then(|| buffer.take_records())
-                        }
+                        buffer.should_flush().then(|| buffer.take_records())
                     };
                     drop(buffers); // Release the lock before async operations
 
