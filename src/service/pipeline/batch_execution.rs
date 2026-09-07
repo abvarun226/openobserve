@@ -14,7 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -131,7 +131,7 @@ static BATCH_BUFFERS: Lazy<[Mutex<HashMap<String, BatchBuffer>>; BATCH_BUFFER_SH
     Lazy::new(|| std::array::from_fn(|_| Mutex::new(HashMap::new())));
 
 #[cfg(feature = "enterprise")]
-fn batch_buffer_shard(key: &str) -> &Mutex<HashMap<String, BatchBuffer>> {
+fn batch_buffer_shard(key: &str) -> &'static Mutex<HashMap<String, BatchBuffer>> {
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
     &BATCH_BUFFERS[hasher.finish() as usize % BATCH_BUFFER_SHARDS]
@@ -1092,31 +1092,29 @@ async fn process_node(
 
                     // Add records to the accumulating buffer and check if we should flush
                     let mut buffers = batch_buffer_shard(&buffer_key).lock().await;
-                    let buffer = buffers
-                        .entry(buffer_key.clone())
-                        .or_insert_with(BatchBuffer::new);
+                    let can_flush_directly = batch_records.len() >= MAX_BATCH_SIZE;
+                    let records_to_write = match buffers.entry(buffer_key) {
+                        Entry::Vacant(_) if can_flush_directly => Some(batch_records),
+                        Entry::Occupied(entry)
+                            if can_flush_directly && entry.get().records.is_empty() =>
+                        {
+                            entry.remove();
+                            Some(batch_records)
+                        }
+                        entry => {
+                            let buffer = entry.or_insert_with(BatchBuffer::new);
+                            let initial_record_count = buffer.records.len();
+                            buffer.add_records(batch_records);
 
-                    let initial_record_count = buffer.records.len();
-                    let records_to_write = if initial_record_count == 0
-                        && batch_records.len() >= MAX_BATCH_SIZE
-                    {
-                        buffer.last_write = Instant::now();
-                        log::debug!(
-                            "[Pipeline]: Bypassing the empty buffer for batch_key '{batch_key}' - writing {} records directly to WAL",
-                            batch_records.len()
-                        );
-                        Some(batch_records)
-                    } else {
-                        buffer.add_records(batch_records);
+                            log::debug!(
+                                "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
+                                buffer.records.len() - initial_record_count,
+                                buffer.records.len(),
+                                buffer.total_bytes
+                            );
 
-                        log::debug!(
-                            "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
-                            buffer.records.len() - initial_record_count,
-                            buffer.records.len(),
-                            buffer.total_bytes
-                        );
-
-                        buffer.should_flush().then(|| buffer.take_records())
+                            buffer.should_flush().then(|| buffer.take_records())
+                        }
                     };
                     drop(buffers); // Release the lock before async operations
 
