@@ -982,7 +982,7 @@ async fn process_node(
         }
         #[cfg(feature = "enterprise")]
         NodeData::RemoteStream(remote_stream) => {
-            let mut records = Vec::with_capacity(50);
+            let mut records = Vec::with_capacity(64);
             let mut uniform_batch_key = None;
             let mut grouped_records = None;
             log::debug!(
