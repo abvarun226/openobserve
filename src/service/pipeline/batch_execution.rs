@@ -14,6 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, hash_map::Entry},
     sync::Arc,
     time::{Duration, Instant},
@@ -1097,7 +1098,11 @@ async fn process_node(
                     } else {
                         match uniform_batch_key.as_deref() {
                             None => {
-                                uniform_batch_key = Some(record_batch_key.to_string());
+                                uniform_batch_key = Some(if record_batch_key == "default" {
+                                    Cow::Borrowed("default")
+                                } else {
+                                    Cow::Owned(record_batch_key.to_string())
+                                });
                                 records.push(record);
                             }
                             Some(batch_key) if batch_key == record_batch_key => {
@@ -1106,7 +1111,7 @@ async fn process_node(
                             Some(_) => {
                                 let mut groups = HashMap::new();
                                 groups.insert(
-                                    uniform_batch_key.take().unwrap(),
+                                    uniform_batch_key.take().unwrap().into_owned(),
                                     std::mem::take(&mut records),
                                 );
                                 groups
@@ -1127,7 +1132,12 @@ async fn process_node(
                 let records_by_batch_key = uniform_batch_key
                     .zip(Some(records))
                     .into_iter()
-                    .chain(grouped_records.into_iter().flatten());
+                    .chain(
+                        grouped_records
+                            .into_iter()
+                            .flatten()
+                            .map(|(batch_key, records)| (Cow::Owned(batch_key), records)),
+                    );
 
                 log::debug!(
                     "[Pipeline]: Grouped records into {batch_key_count} batch keys"
