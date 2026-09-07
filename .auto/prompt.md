@@ -52,6 +52,9 @@ Read-only supporting code:
 4. Reuse the existing bulk write fast path for nested-pipeline-free destination streams only when black-box output remains equivalent.
 
 ## What has been tried
+- Empty RemoteStream buffers now bypass accumulation when an incoming group already meets the 50-record flush threshold. Vacant and empty entries do not persist. These two retained experiments reduced median latency from 33.262 ms to 26.420 ms and raised candidate throughput to 41,467 records/s.
+- RemoteStream batch keys are grouped during collection, group iteration has no intermediate vector, and the request accumulator uses a bounded 64-record capacity. These retained experiments reduced the best median latency to 23.189 ms with about 41,437 records/s.
+- Full-request accumulator preallocation, buffer `try_lock`, final-child item moves, Arc-based parallel fan-out clones, and disabled timing-work gating all regressed client latency. Arc fan-out improved throughput to 43,808 records/s, but increased latency by 5.98%.
 - `ExecutablePipeline::node_map` now stores immutable nodes in `Arc`. Each request clones 28 pointers instead of deep-cloning node metadata. This retained a 6.58% latency improvement, from 35.606 ms to 33.262 ms, with throughput flat at about 40,141 records/s.
 - The retained candidate's fresh black-box result is 59.15% lower client latency and 89.72% higher throughput than `branch-v0.40.0`. The benchmark oracle and healthy, retry, and restart checks pass.
 - Allocation-free source-size counting, shared VRL resolvers, shared task-label strings, borrowed request-local channel keys, and borrowed VRL context strings all regressed client latency.
