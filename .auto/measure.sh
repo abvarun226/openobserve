@@ -44,10 +44,27 @@ build_baseline_binary() (
 if [[ ! -x "$bin_dir/baseline-openobserve" ]]; then
     build_baseline_binary
 fi
-(
-    cd "$candidate_src"
-    cargo build --release --features enterprise
+build_candidate_binary() (
+    set -euo pipefail
+    local backup_dir
+    backup_dir=$(mktemp -d /data/tmp/o2-enterprise-candidate-build.XXXXXX)
+    cp -f "$candidate_src/Cargo.toml" "$backup_dir/Cargo.toml"
+    cp -f "$candidate_src/Cargo.lock" "$backup_dir/Cargo.lock"
+    restore() {
+        cp -f "$backup_dir/Cargo.toml" "$candidate_src/Cargo.toml"
+        cp -f "$backup_dir/Cargo.lock" "$candidate_src/Cargo.lock"
+        rm -rf "$backup_dir"
+    }
+    trap restore EXIT
+
+    cp -f "$enterprise_src/Cargo.toml.openobserve" "$candidate_src/Cargo.toml"
+    (
+        cd "$candidate_src"
+        cargo build --release --features enterprise
+    )
 )
+
+build_candidate_binary
 cp -f "$candidate_src/target/release/openobserve" "$bin_dir/candidate-openobserve"
 git -C "$candidate_src" rev-parse HEAD >"$bin_dir/candidate-revision"
 
