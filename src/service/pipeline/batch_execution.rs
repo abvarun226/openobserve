@@ -1077,15 +1077,14 @@ async fn process_node(
 
             log::debug!("[Pipeline]: RemoteStream node processed {count} records");
             if count != 0 {
-                let records_by_batch_key = if let Some(grouped_records) = grouped_records {
-                    grouped_records.into_iter().collect::<Vec<_>>()
-                } else {
-                    vec![(uniform_batch_key.unwrap(), records)]
-                };
+                let batch_key_count = grouped_records.as_ref().map_or(1, HashMap::len);
+                let records_by_batch_key = uniform_batch_key
+                    .zip(Some(records))
+                    .into_iter()
+                    .chain(grouped_records.into_iter().flatten());
 
                 log::debug!(
-                    "[Pipeline]: Grouped records into {} batch keys",
-                    records_by_batch_key.len()
+                    "[Pipeline]: Grouped records into {batch_key_count} batch keys"
                 );
 
                 // Process each batch_key group separately
