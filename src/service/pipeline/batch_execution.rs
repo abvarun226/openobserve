@@ -983,6 +983,8 @@ async fn process_node(
         #[cfg(feature = "enterprise")]
         NodeData::RemoteStream(remote_stream) => {
             let mut records = Vec::with_capacity(50);
+            let mut uniform_batch_key = None;
+            let mut grouped_records = None;
             log::debug!(
                 "[Pipeline]: Destination node {node_idx} starts processing, remote_stream : {remote_stream:?}"
             );
@@ -1036,41 +1038,49 @@ async fn process_node(
                         continue;
                     }
 
-                    records.push(record);
+                    let record_batch_key = record
+                        .get("batch_key")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("default");
+                    if let Some(groups) = &mut grouped_records {
+                        let groups: &mut HashMap<String, Vec<json::Value>> = groups;
+                        groups
+                            .entry(record_batch_key.to_string())
+                            .or_default()
+                            .push(record);
+                    } else {
+                        match uniform_batch_key.as_deref() {
+                            None => {
+                                uniform_batch_key = Some(record_batch_key.to_string());
+                                records.push(record);
+                            }
+                            Some(batch_key) if batch_key == record_batch_key => {
+                                records.push(record);
+                            }
+                            Some(_) => {
+                                let mut groups = HashMap::new();
+                                groups.insert(
+                                    uniform_batch_key.take().unwrap(),
+                                    std::mem::take(&mut records),
+                                );
+                                groups
+                                    .entry(record_batch_key.to_string())
+                                    .or_default()
+                                    .push(record);
+                                grouped_records = Some(groups);
+                            }
+                        }
+                    }
                     count += 1;
                 }
             }
 
-            log::debug!(
-                "[Pipeline]: RemoteStream node processed {} records",
-                records.len()
-            );
-            if !records.is_empty() {
-                let batch_key = records[0]
-                    .get("batch_key")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("default");
-                let records_by_batch_key = if records.iter().all(|record| {
-                    record
-                        .get("batch_key")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("default")
-                        == batch_key
-                }) {
-                    vec![(batch_key.to_string(), records)]
-                } else {
-                    let mut grouped_records: HashMap<String, Vec<json::Value>> = HashMap::new();
-
-                    for record in records {
-                        let batch_key = record
-                            .get("batch_key")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("default")
-                            .to_string();
-                        grouped_records.entry(batch_key).or_default().push(record);
-                    }
-
+            log::debug!("[Pipeline]: RemoteStream node processed {count} records");
+            if count != 0 {
+                let records_by_batch_key = if let Some(grouped_records) = grouped_records {
                     grouped_records.into_iter().collect::<Vec<_>>()
+                } else {
+                    vec![(uniform_batch_key.unwrap(), records)]
                 };
 
                 log::debug!(
