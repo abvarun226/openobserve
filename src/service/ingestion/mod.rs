@@ -97,7 +97,7 @@ pub fn compile_vrl_function(func: &str, org_id: &str) -> Result<VRLRuntimeConfig
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct VrlContext {
     metadata: vrl::value::Value,
     secrets: vrl::value::Secrets,
@@ -124,13 +124,14 @@ pub fn apply_vrl_fn(
     org_id: &str,
     stream_name: &[String],
 ) -> (Value, Option<String>) {
+    let mut context = VrlContext::new(org_id, &stream_name[0]);
     apply_vrl_fn_inner(
         runtime,
         vrl_runtime,
         Cow::Owned(row),
         org_id,
         stream_name,
-        VrlContext::new(org_id, &stream_name[0]),
+        &mut context,
     )
 }
 
@@ -141,15 +142,20 @@ pub fn apply_vrl_fn_with_context(
     org_id: &str,
     stream_name: &[String],
     context: &VrlContext,
+    scratch: &mut VrlContext,
 ) -> (Value, Option<String>) {
-    apply_vrl_fn_inner(
+    let result = apply_vrl_fn_inner(
         runtime,
         vrl_runtime,
         Cow::Owned(row),
         org_id,
         stream_name,
-        context.clone(),
-    )
+        scratch,
+    );
+    if scratch != context {
+        scratch.clone_from(context);
+    }
+    result
 }
 
 pub fn apply_vrl_fn_with_context_ref(
@@ -159,15 +165,20 @@ pub fn apply_vrl_fn_with_context_ref(
     org_id: &str,
     stream_name: &[String],
     context: &VrlContext,
+    scratch: &mut VrlContext,
 ) -> (Value, Option<String>) {
-    apply_vrl_fn_inner(
+    let result = apply_vrl_fn_inner(
         runtime,
         vrl_runtime,
         Cow::Borrowed(row),
         org_id,
         stream_name,
-        context.clone(),
-    )
+        scratch,
+    );
+    if scratch != context {
+        scratch.clone_from(context);
+    }
+    result
 }
 
 fn apply_vrl_fn_inner(
@@ -176,16 +187,12 @@ fn apply_vrl_fn_inner(
     row: Cow<'_, Value>,
     org_id: &str,
     stream_name: &[String],
-    context: VrlContext,
+    context: &mut VrlContext,
 ) -> (Value, Option<String>) {
-    let VrlContext {
-        mut metadata,
-        mut secrets,
-    } = context;
     let mut target = TargetValueRef {
         value: &mut vrl::value::Value::from(row.as_ref()),
-        metadata: &mut metadata,
-        secrets: &mut secrets,
+        metadata: &mut context.metadata,
+        secrets: &mut context.secrets,
     };
 
     let timezone = vrl::compiler::TimeZone::Local;

@@ -855,6 +855,7 @@ async fn process_node(
             let mut runtime = crate::service::ingestion::init_functions_runtime();
             let stream_name = stream_name.unwrap_or("pipeline".to_string());
             let vrl_context = VrlContext::new(&org_id, &stream_name);
+            let mut vrl_scratch = vrl_context.clone();
             let mut result_array_records = Vec::new();
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
@@ -908,6 +909,7 @@ async fn process_node(
                                 &org_id,
                                 std::slice::from_ref(&stream_name),
                                 &vrl_context,
+                                &mut vrl_scratch,
                             ),
                             PipelineRecord::Shared(record) => apply_vrl_fn_with_context_ref(
                                 &mut runtime,
@@ -916,6 +918,7 @@ async fn process_node(
                                 &org_id,
                                 std::slice::from_ref(&stream_name),
                                 &vrl_context,
+                                &mut vrl_scratch,
                             ),
                         };
                         busy += vrl_timer.elapsed();
@@ -971,6 +974,7 @@ async fn process_node(
                     &org_id,
                     std::slice::from_ref(&stream_name),
                     &vrl_context,
+                    &mut vrl_scratch,
                 );
                 busy += vrl_arr_timer.elapsed();
                 let result = match vrl_arr_res {
