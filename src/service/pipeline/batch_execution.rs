@@ -321,19 +321,21 @@ impl ExecutablePipeline {
             );
         }
 
+        let channel_capacity = batch_size.min(64);
+
         // result_channel
         let (result_sender, mut result_receiver) =
-            channel::<(usize, StreamParams, Value)>(batch_size);
+            channel::<(usize, StreamParams, Value)>(channel_capacity);
 
         // error_channel
         let (error_sender, mut error_receiver) =
-            channel::<(String, String, String, Option<String>)>(batch_size);
+            channel::<(String, String, String, Option<String>)>(channel_capacity);
 
         let mut node_senders = HashMap::new();
         let mut node_receivers = HashMap::new();
 
         for node_id in &self.sorted_nodes {
-            let (sender, receiver) = channel::<PipelineItem>(batch_size);
+            let (sender, receiver) = channel::<PipelineItem>(channel_capacity);
             node_senders.insert(node_id.to_string(), sender);
             node_receivers.insert(node_id.to_string(), receiver);
         }
