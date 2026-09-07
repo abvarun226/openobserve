@@ -15,6 +15,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 #[cfg(feature = "enterprise")]
@@ -183,7 +184,7 @@ pub struct ExecutablePipeline {
     source_node_id: String,
     sorted_nodes: Vec<String>,
     vrl_map: HashMap<String, (VRLResultResolver, bool)>,
-    node_map: HashMap<String, ExecutableNode>,
+    node_map: HashMap<String, Arc<ExecutableNode>>,
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +262,10 @@ impl ExecutablePipeline {
             }
         };
         let source_node_id = sorted_nodes[0].to_owned();
+        let node_map = node_map
+            .into_iter()
+            .map(|(node_id, node)| (node_id, Arc::new(node)))
+            .collect();
 
         Ok(Self {
             id: pipeline.id.to_string(),
@@ -638,7 +643,7 @@ async fn process_node(
     pipeline_id: String,
     node_idx: usize,
     org_id: String,
-    node: ExecutableNode,
+    node: Arc<ExecutableNode>,
     mut receiver: Receiver<PipelineItem>,
     mut child_senders: Vec<Sender<PipelineItem>>,
     vrl_runtime: Option<(VRLResultResolver, bool)>,
