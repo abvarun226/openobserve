@@ -52,7 +52,10 @@ use crate::{
     common::infra::config::QUERY_FUNCTIONS,
     service::{
         alerts::{ConditionExt, ConditionGroupExt},
-        ingestion::{VrlContext, apply_vrl_fn_with_context, compile_vrl_function},
+        ingestion::{
+            VrlContext, apply_vrl_fn_with_context, apply_vrl_fn_with_context_ref,
+            compile_vrl_function,
+        },
         self_reporting::publish_error,
     },
 };
@@ -856,55 +859,67 @@ async fn process_node(
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
                     idx,
-                    record,
+                    mut record,
                     mut flattened,
                 } = pipeline_item;
-                let mut record = record.into_owned();
                 if let Some((vrl_runtime, is_result_array_vrl)) = &vrl_runtime {
-                    if func_params.after_flatten
-                        && !flattened
-                        && !record.is_null()
-                        && record.is_object()
-                    {
-                        let flatten_timer = Instant::now();
-                        let flatten_res =
-                            flatten::flatten_with_level(record, cfg.limit.ingest_flatten_level);
-                        busy += flatten_timer.elapsed();
-                        record = match flatten_res {
-                            Ok(flattened) => flattened,
-                            Err(e) => {
-                                let err_msg = format!("FunctionNode error with flattening: {e}");
-                                let err_msg = err_msg.get(0..500).unwrap_or(&err_msg);
-                                if let Err(send_err) = error_sender
-                                    .send((
-                                        node.id.to_string(),
-                                        node.node_type(),
-                                        err_msg.to_owned(),
-                                        Some(func_params.name.to_owned()),
-                                    ))
-                                    .await
-                                {
-                                    log::error!(
-                                        "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
-                                    );
-                                    break;
+                    if func_params.after_flatten {
+                        let mut owned_record = record.into_owned();
+                        if !flattened && !owned_record.is_null() && owned_record.is_object() {
+                            let flatten_timer = Instant::now();
+                            let flatten_res = flatten::flatten_with_level(
+                                owned_record,
+                                cfg.limit.ingest_flatten_level,
+                            );
+                            busy += flatten_timer.elapsed();
+                            owned_record = match flatten_res {
+                                Ok(flattened) => flattened,
+                                Err(e) => {
+                                    let err_msg =
+                                        format!("FunctionNode error with flattening: {e}");
+                                    let err_msg = err_msg.get(0..500).unwrap_or(&err_msg);
+                                    if let Err(send_err) = error_sender
+                                        .send((
+                                            node.id.to_string(),
+                                            node.node_type(),
+                                            err_msg.to_owned(),
+                                            Some(func_params.name.to_owned()),
+                                        ))
+                                        .await
+                                    {
+                                        log::error!(
+                                            "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
+                                        );
+                                        break;
+                                    }
+                                    continue;
                                 }
-                                continue;
-                            }
-                        };
+                            };
+                        }
+                        record = PipelineRecord::Owned(owned_record);
                     }
                     if !is_result_array_vrl {
                         let vrl_timer = Instant::now();
-                        let vrl_res = apply_vrl_fn_with_context(
-                            &mut runtime,
-                            vrl_runtime,
-                            record,
-                            &org_id,
-                            std::slice::from_ref(&stream_name),
-                            &vrl_context,
-                        );
+                        let vrl_res = match record {
+                            PipelineRecord::Owned(record) => apply_vrl_fn_with_context(
+                                &mut runtime,
+                                vrl_runtime,
+                                record,
+                                &org_id,
+                                std::slice::from_ref(&stream_name),
+                                &vrl_context,
+                            ),
+                            PipelineRecord::Shared(record) => apply_vrl_fn_with_context_ref(
+                                &mut runtime,
+                                vrl_runtime,
+                                &record,
+                                &org_id,
+                                std::slice::from_ref(&stream_name),
+                                &vrl_context,
+                            ),
+                        };
                         busy += vrl_timer.elapsed();
-                        record = match vrl_res {
+                        let record = match vrl_res {
                             (res, None) => res,
                             (res, Some(error)) => {
                                 let err_msg = format!(
@@ -940,7 +955,7 @@ async fn process_node(
                         )
                         .await;
                     } else {
-                        result_array_records.push(record);
+                        result_array_records.push(record.into_owned());
                     }
                 }
                 count += 1;

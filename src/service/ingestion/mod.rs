@@ -14,6 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     io::Write,
     sync::{Arc, atomic::Ordering},
@@ -126,7 +127,7 @@ pub fn apply_vrl_fn(
     apply_vrl_fn_inner(
         runtime,
         vrl_runtime,
-        row,
+        Cow::Owned(row),
         org_id,
         stream_name,
         VrlContext::new(org_id, &stream_name[0]),
@@ -144,7 +145,25 @@ pub fn apply_vrl_fn_with_context(
     apply_vrl_fn_inner(
         runtime,
         vrl_runtime,
-        row,
+        Cow::Owned(row),
+        org_id,
+        stream_name,
+        context.clone(),
+    )
+}
+
+pub fn apply_vrl_fn_with_context_ref(
+    runtime: &mut Runtime,
+    vrl_runtime: &VRLResultResolver,
+    row: &Value,
+    org_id: &str,
+    stream_name: &[String],
+    context: &VrlContext,
+) -> (Value, Option<String>) {
+    apply_vrl_fn_inner(
+        runtime,
+        vrl_runtime,
+        Cow::Borrowed(row),
         org_id,
         stream_name,
         context.clone(),
@@ -154,7 +173,7 @@ pub fn apply_vrl_fn_with_context(
 fn apply_vrl_fn_inner(
     runtime: &mut Runtime,
     vrl_runtime: &VRLResultResolver,
-    row: Value,
+    row: Cow<'_, Value>,
     org_id: &str,
     stream_name: &[String],
     context: VrlContext,
@@ -164,7 +183,7 @@ fn apply_vrl_fn_inner(
         mut secrets,
     } = context;
     let mut target = TargetValueRef {
-        value: &mut vrl::value::Value::from(&row),
+        value: &mut vrl::value::Value::from(row.as_ref()),
         metadata: &mut metadata,
         secrets: &mut secrets,
     };
@@ -193,7 +212,7 @@ fn apply_vrl_fn_inner(
                 );
                 // Return only error message without sensitive record data
                 let clean_err = format!("{org_id}/{stream_name:?} vrl failed: {err:?}");
-                (row, Some(clean_err))
+                (row.into_owned(), Some(clean_err))
             }
         },
         Err(err) => {
@@ -211,7 +230,7 @@ fn apply_vrl_fn_inner(
             );
             // Return only error message without sensitive record data
             let clean_err = format!("{org_id}/{stream_name:?} vrl runtime error: {err:?}");
-            (row, Some(clean_err))
+            (row.into_owned(), Some(clean_err))
         }
     }
 }
