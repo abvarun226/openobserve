@@ -417,7 +417,7 @@ impl ExecutablePipeline {
         for (idx, record) in records.into_iter().enumerate() {
             let pipeline_item = PipelineItem {
                 idx,
-                record,
+                record: PipelineRecord::Owned(record),
                 flattened,
             };
             if let Err(send_err) = source_sender.send(pipeline_item).await {
@@ -632,9 +632,31 @@ impl Default for ExecutablePipelineBulkInputs {
 }
 
 #[derive(Debug, Clone)]
+enum PipelineRecord {
+    Owned(Value),
+    Shared(Arc<Value>),
+}
+
+impl PipelineRecord {
+    fn into_owned(self) -> Value {
+        match self {
+            Self::Owned(record) => record,
+            Self::Shared(record) => Arc::unwrap_or_clone(record),
+        }
+    }
+
+    fn into_shared(self) -> Self {
+        match self {
+            Self::Owned(record) => Self::Shared(Arc::new(record)),
+            shared => shared,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct PipelineItem {
     idx: usize,
-    record: Value,
+    record: PipelineRecord,
     flattened: bool,
 }
 
@@ -675,9 +697,10 @@ async fn process_node(
                 while let Some(pipeline_item) = receiver.recv().await {
                     let PipelineItem {
                         idx,
-                        mut record,
+                        record,
                         flattened,
                     } = pipeline_item;
+                    let mut record = record.into_owned();
                     if !flattened && !record.is_null() && record.is_object() {
                         let flatten_timer = Instant::now();
                         let flatten_res =
@@ -764,9 +787,10 @@ async fn process_node(
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
                     idx,
-                    mut record,
+                    record,
                     mut flattened,
                 } = pipeline_item;
+                let mut record = record.into_owned();
                 // value must be flattened before condition params can take effect
                 if !flattened && !record.is_null() && record.is_object() {
                     let flatten_timer = Instant::now();
@@ -812,7 +836,7 @@ async fn process_node(
                         &mut child_senders,
                         PipelineItem {
                             idx,
-                            record,
+                            record: PipelineRecord::Owned(record),
                             flattened,
                         },
                         "ConditionNode",
@@ -831,9 +855,10 @@ async fn process_node(
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
                     idx,
-                    mut record,
+                    record,
                     mut flattened,
                 } = pipeline_item;
+                let mut record = record.into_owned();
                 if let Some((vrl_runtime, is_result_array_vrl)) = &vrl_runtime {
                     if func_params.after_flatten
                         && !flattened
@@ -906,7 +931,7 @@ async fn process_node(
                             &mut child_senders,
                             PipelineItem {
                                 idx,
-                                record,
+                                record: PipelineRecord::Owned(record),
                                 flattened,
                             },
                             "FunctionNode",
@@ -961,7 +986,7 @@ async fn process_node(
                         &mut child_senders,
                         PipelineItem {
                             idx: usize::MAX,
-                            record: record.clone(),
+                            record: PipelineRecord::Owned(record.clone()),
                             flattened: false,
                         },
                         "FunctionNode",
@@ -993,10 +1018,9 @@ async fn process_node(
             let max_ts = now + cfg.limit.ingest_allowed_in_future_micro;
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
-                    mut record,
-                    flattened,
-                    ..
+                    record, flattened, ..
                 } = pipeline_item;
+                let mut record = record.into_owned();
                 // handle timestamp before sending to remote_write service
                 if !flattened && !record.is_null() && record.is_object() {
                     let flatten_timer = Instant::now();
@@ -1315,6 +1339,10 @@ async fn send_to_children(
             );
         }
     } else {
+        let item = PipelineItem {
+            record: item.record.into_shared(),
+            ..item
+        };
         for child_sender in child_senders.iter_mut() {
             if let Err(send_err) = child_sender.send(item.clone()).await {
                 log::error!(
