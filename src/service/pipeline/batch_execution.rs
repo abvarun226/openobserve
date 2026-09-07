@@ -52,7 +52,7 @@ use crate::{
     common::infra::config::QUERY_FUNCTIONS,
     service::{
         alerts::{ConditionExt, ConditionGroupExt},
-        ingestion::{apply_vrl_fn, compile_vrl_function},
+        ingestion::{VrlContext, apply_vrl_fn_with_context, compile_vrl_function},
         self_reporting::publish_error,
     },
 };
@@ -851,6 +851,7 @@ async fn process_node(
             log::debug!("[Pipeline]: func node {node_idx} starts processing");
             let mut runtime = crate::service::ingestion::init_functions_runtime();
             let stream_name = stream_name.unwrap_or("pipeline".to_string());
+            let vrl_context = VrlContext::new(&org_id, &stream_name);
             let mut result_array_records = Vec::new();
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
@@ -894,12 +895,13 @@ async fn process_node(
                     }
                     if !is_result_array_vrl {
                         let vrl_timer = Instant::now();
-                        let vrl_res = apply_vrl_fn(
+                        let vrl_res = apply_vrl_fn_with_context(
                             &mut runtime,
                             vrl_runtime,
                             record,
                             &org_id,
                             std::slice::from_ref(&stream_name),
+                            &vrl_context,
                         );
                         busy += vrl_timer.elapsed();
                         record = match vrl_res {
@@ -947,12 +949,13 @@ async fn process_node(
                 && let Some((vrl_runtime, true)) = &vrl_runtime
             {
                 let vrl_arr_timer = Instant::now();
-                let vrl_arr_res = apply_vrl_fn(
+                let vrl_arr_res = apply_vrl_fn_with_context(
                     &mut runtime,
                     vrl_runtime,
                     json::Value::Array(result_array_records),
                     &org_id,
                     std::slice::from_ref(&stream_name),
+                    &vrl_context,
                 );
                 busy += vrl_arr_timer.elapsed();
                 let result = match vrl_arr_res {
