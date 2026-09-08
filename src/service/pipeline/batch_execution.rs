@@ -935,15 +935,41 @@ async fn process_node(
                                 break;
                             }
                         }
-                        // VRL may produce unflattened output; downstream
-                        // nodes handle flattening via flatten_with_level
-                        // which short-circuits for already-flat records.
-                        flattened = false;
+                        // Check VRL-native flatness to set the flattened
+                        // flag, preventing downstream flatten_with_level
+                        // calls on the 12 RemoteStream nodes.
+                        flattened = match &vrl_res {
+                            vrl::value::Value::Object(map) => {
+                                !map.values().any(|v| v.is_object() || v.is_array())
+                            }
+                            _ => true,
+                        };
+                        // If not flat, convert to serde_json and flatten
+                        // once before fan-out.
+                        let out_record = if !flattened {
+                            match vrl_res.try_into() {
+                                Ok(serde_val) => {
+                                    match flatten::flatten_with_level(
+                                        serde_val,
+                                        cfg.limit.ingest_flatten_level,
+                                    ) {
+                                        Ok(flat) => {
+                                            flattened = true;
+                                            PipelineRecord::Owned(flat)
+                                        }
+                                        Err(_) => continue,
+                                    }
+                                }
+                                Err(_) => continue,
+                            }
+                        } else {
+                            PipelineRecord::VrlOwned(vrl_res)
+                        };
                         send_to_children(
                             &mut child_senders,
                             PipelineItem {
                                 idx,
-                                record: PipelineRecord::VrlOwned(vrl_res),
+                                record: out_record,
                                 flattened,
                             },
                             "FunctionNode",

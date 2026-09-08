@@ -1,10 +1,10 @@
 # Realtime pipeline fan-out ideas
 
 ## Current status
-- Throughput: 49.4-50.9k records/s reproducibly, 100-120% above branch-v0.40.0
-- Latency: 19-25 ms, 70-78% below branch-v0.40.0
-- Both targets (100% improvement each) consistently met
-- Remaining bottleneck: inherent VRL execution (14 calls/record, 28 value conversions/record) and Tokio channel scheduling
+- Throughput: 54.4k records/s, 126% above branch-v0.40.0
+- Latency: 20.3 ms, 75% below branch-v0.40.0
+- Both targets (100% improvement each) significantly exceeded
+- VRL-native pipeline records eliminated 14 redundant serde↔vrl conversions per record
 
 ## Ideas for future work
 - Strengthen the external benchmark oracle to reject duplicate and unexpected measured deliveries and validate measured local records; keep this outside optimization commits.
@@ -18,10 +18,15 @@
 - Source size sampling from first record (catastrophic regression — something downstream is sensitive to accurate source_size)
 - Merged source_size estimation into feed loop (within noise)
 - try_send for source feed (improved latency 17%, throughput within noise)
+- Extended try_send to source+result channels (regressed 3.4%)
+- Channel capacity 32 (within noise)
+- Cooperative yield interval 256 (within noise)
+- Pre-flatten skip for single-child functions (regressed 5% — flattened flag is needed)
+- BATCH_BUFFER_SHARDS 64 (regressed 4.4%)
 
 ## Remaining ideas
-- Fuse sequential linear function chains (common-01 → common-02) into a single task to eliminate one channel hop per record for the chained VRL transforms.
+- The VRL-native path currently skips pre-flatten. For multi-child fan-outs (common-02), re-add a VRL-native flatness check to set flattened=true and avoid 12 downstream flatten_with_level calls.
 - Enterprise `get_pipeline_wal_writer` calls `update_writer_metrics` on EVERY lookup, scanning all registry entries. This is read-only enterprise code, so can't fix directly. Could cache the writer Arc across requests if the buffer_key is stable.
-- Per-record VRL Value conversion (serde_json ↔ vrl::value) is likely the dominant cost. Each of 14 function nodes does 2 conversions per record = 28,000 conversions per 1000-record request. Can't change VRL library.
 - Batching multiple records per channel message to reduce channel operation overhead (complex refactor).
-- Reduce `send_to_children` for large fan-outs using concurrent sends (previous fan-out changes regressed).
+- The leaf/RemoteStream into_owned conversion from VrlOwned to serde_json now happens at the boundary. Could batch these conversions or parallelize them.
+- The source node currently sends serde_json Owned records. Could convert to VRL at the source and avoid the first function node's into_vrl conversion.
