@@ -242,6 +242,51 @@ fn apply_vrl_fn_inner(
     }
 }
 
+/// Run VRL directly on a vrl::value::Value, avoiding serde_json conversions.
+/// Returns the VRL result as vrl::value::Value. On error, returns the original
+/// value and an error message.
+pub fn apply_vrl_fn_on_vrl(
+    runtime: &mut Runtime,
+    vrl_runtime: &VRLResultResolver,
+    mut vrl_val: vrl::value::Value,
+    org_id: &str,
+    stream_name: &[String],
+    context: &VrlContext,
+    scratch: &mut VrlContext,
+) -> (vrl::value::Value, Option<String>) {
+    let mut target = TargetValueRef {
+        value: &mut vrl_val,
+        metadata: &mut scratch.metadata,
+        secrets: &mut scratch.secrets,
+    };
+
+    let timezone = vrl::compiler::TimeZone::Local;
+    let result = match vrl::compiler::VrlRuntime::default() {
+        vrl::compiler::VrlRuntime::Ast => {
+            runtime.resolve(&mut target, &vrl_runtime.program, &timezone)
+        }
+    };
+    // Reset scratch if VRL mutated metadata or secrets
+    if scratch != context {
+        scratch.clone_from(context);
+    }
+    match result {
+        Ok(res) => (res, None),
+        Err(err) => {
+            metrics::INGEST_ERRORS
+                .with_label_values(&[
+                    org_id,
+                    StreamType::Logs.as_str(),
+                    &format!("{stream_name:?}"),
+                    TRANSFORM_FAILED,
+                ])
+                .inc();
+            let clean_err = format!("{org_id}/{stream_name:?} vrl runtime error: {err:?}");
+            (vrl_val, Some(clean_err))
+        }
+    }
+}
+
 pub async fn get_stream_partition_keys(
     org_id: &str,
     stream_type: &StreamType,

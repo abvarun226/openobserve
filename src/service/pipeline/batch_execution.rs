@@ -53,8 +53,7 @@ use crate::{
     service::{
         alerts::{ConditionExt, ConditionGroupExt},
         ingestion::{
-            VrlContext, apply_vrl_fn_with_context, apply_vrl_fn_with_context_ref,
-            compile_vrl_function,
+            VrlContext, apply_vrl_fn_on_vrl, apply_vrl_fn_with_context, compile_vrl_function,
         },
         self_reporting::publish_error,
     },
@@ -621,6 +620,10 @@ impl Default for ExecutablePipelineBulkInputs {
 enum PipelineRecord {
     Owned(Value),
     Shared(Arc<Value>),
+    /// VRL-native value: avoids redundant serde_json ↔ vrl conversions
+    /// between consecutive function nodes.
+    VrlOwned(vrl::value::Value),
+    VrlShared(Arc<vrl::value::Value>),
 }
 
 impl PipelineRecord {
@@ -628,13 +631,29 @@ impl PipelineRecord {
         match self {
             Self::Owned(record) => record,
             Self::Shared(record) => Arc::unwrap_or_clone(record),
+            Self::VrlOwned(record) => record.try_into().unwrap_or_default(),
+            Self::VrlShared(record) => {
+                Arc::unwrap_or_clone(record).try_into().unwrap_or_default()
+            }
         }
     }
 
     fn into_shared(self) -> Self {
         match self {
             Self::Owned(record) => Self::Shared(Arc::new(record)),
+            Self::VrlOwned(record) => Self::VrlShared(Arc::new(record)),
             shared => shared,
+        }
+    }
+
+    /// Convert to a mutable vrl::value::Value for VRL execution.
+    /// Avoids conversion when the record is already in VRL format.
+    fn into_vrl(self) -> vrl::value::Value {
+        match self {
+            Self::Owned(record) => vrl::value::Value::from(&record),
+            Self::Shared(record) => vrl::value::Value::from(record.as_ref()),
+            Self::VrlOwned(record) => record,
+            Self::VrlShared(record) => Arc::unwrap_or_clone(record),
         }
     }
 }
@@ -884,81 +903,47 @@ async fn process_node(
                     }
                     if !is_result_array_vrl {
                         let vrl_timer = Instant::now();
-                        let vrl_res = match record {
-                            PipelineRecord::Owned(record) => apply_vrl_fn_with_context(
-                                &mut runtime,
-                                vrl_runtime,
-                                record,
-                                &org_id,
-                                std::slice::from_ref(&stream_name),
-                                &vrl_context,
-                                &mut vrl_scratch,
-                            ),
-                            PipelineRecord::Shared(record) => apply_vrl_fn_with_context_ref(
-                                &mut runtime,
-                                vrl_runtime,
-                                &record,
-                                &org_id,
-                                std::slice::from_ref(&stream_name),
-                                &vrl_context,
-                                &mut vrl_scratch,
-                            ),
-                        };
+                        // Convert to VRL format (free if already VrlOwned)
+                        let vrl_val = record.into_vrl();
+                        let (vrl_res, vrl_err) = apply_vrl_fn_on_vrl(
+                            &mut runtime,
+                            vrl_runtime,
+                            vrl_val,
+                            &org_id,
+                            std::slice::from_ref(&stream_name),
+                            &vrl_context,
+                            &mut vrl_scratch,
+                        );
                         busy += vrl_timer.elapsed();
-                        let record = match vrl_res {
-                            (res, None) => res,
-                            (res, Some(error)) => {
-                                let err_msg = format!(
-                                    "FunctionNode error: {}",
-                                    error.get(0..500).unwrap_or(&error)
+                        if let Some(error) = vrl_err {
+                            let err_msg = format!(
+                                "FunctionNode error: {}",
+                                error.get(0..500).unwrap_or(&error)
+                            );
+                            if let Err(send_err) = error_sender
+                                .send((
+                                    node.id.to_string(),
+                                    node.node_type(),
+                                    err_msg.to_owned(),
+                                    Some(func_params.name.to_owned()),
+                                ))
+                                .await
+                            {
+                                log::error!(
+                                    "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
                                 );
-                                if let Err(send_err) = error_sender
-                                    .send((
-                                        node.id.to_string(),
-                                        node.node_type(),
-                                        err_msg.to_owned(),
-                                        Some(func_params.name.to_owned()),
-                                    ))
-                                    .await
-                                {
-                                    log::error!(
-                                        "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
-                                    );
-                                    break;
-                                }
-                                res
+                                break;
                             }
-                        };
-                        flattened = false; // since apply_vrl_fn can produce unflattened data
-                        // Pre-flatten VRL output once before fan-out so
-                        // downstream nodes avoid redundant flatten calls.
-                        let record = if !record.is_null() && record.is_object() {
-                            if flatten::is_flat(&record) {
-                                flattened = true;
-                                record
-                            } else {
-                                match flatten::flatten_with_level(
-                                    record,
-                                    cfg.limit.ingest_flatten_level,
-                                ) {
-                                    Ok(flat) => {
-                                        flattened = true;
-                                        flat
-                                    }
-                                    Err(_) => {
-                                        // Let downstream nodes handle the error.
-                                        continue;
-                                    }
-                                }
-                            }
-                        } else {
-                            record
-                        };
+                        }
+                        // VRL may produce unflattened output; downstream
+                        // nodes handle flattening via flatten_with_level
+                        // which short-circuits for already-flat records.
+                        flattened = false;
                         send_to_children(
                             &mut child_senders,
                             PipelineItem {
                                 idx,
-                                record: PipelineRecord::Owned(record),
+                                record: PipelineRecord::VrlOwned(vrl_res),
                                 flattened,
                             },
                             "FunctionNode",
