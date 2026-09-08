@@ -1352,11 +1352,20 @@ async fn send_to_children(
     node_type: &str,
 ) {
     if child_senders.len() == 1 {
-        // HACK to avoid cloning
-        if let Err(send_err) = child_senders[0].send(item).await {
-            log::error!(
-                "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
-            );
+        // Single child: move without cloning. Use try_send to avoid yielding
+        // when the channel has capacity.
+        match child_senders[0].try_send(item) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
+                if let Err(send_err) = child_senders[0].send(item).await {
+                    log::error!(
+                        "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
+                    );
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                log::error!("[Pipeline]: {node_type} child channel closed");
+            }
         }
     } else {
         let item = PipelineItem {
@@ -1364,11 +1373,20 @@ async fn send_to_children(
             ..item
         };
         for child_sender in child_senders.iter_mut() {
-            if let Err(send_err) = child_sender.send(item.clone()).await {
-                log::error!(
-                    "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
-                );
-                break;
+            match child_sender.try_send(item.clone()) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
+                    if let Err(send_err) = child_sender.send(item).await {
+                        log::error!(
+                            "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
+                        );
+                        break;
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    log::error!("[Pipeline]: {node_type} child channel closed");
+                    break;
+                }
             }
         }
     }
