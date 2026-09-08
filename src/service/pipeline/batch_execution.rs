@@ -21,8 +21,7 @@ use std::{
 };
 #[cfg(feature = "enterprise")]
 use std::hash::{DefaultHasher, Hash, Hasher};
-#[cfg(feature = "enterprise")]
-use std::io::{self, Write};
+
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -63,22 +62,6 @@ use crate::{
 
 // Global batch buffer for accumulating remote stream records
 #[cfg(feature = "enterprise")]
-#[derive(Default)]
-struct ByteCounter(usize);
-
-#[cfg(feature = "enterprise")]
-impl Write for ByteCounter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(feature = "enterprise")]
 #[derive(Debug)]
 struct BatchBuffer {
     records: Vec<json::Value>,
@@ -106,10 +89,7 @@ impl BatchBuffer {
     fn add_records(&mut self, new_records: Vec<json::Value>) {
         for record in new_records {
             if self.records.len() < MAX_BATCH_SIZE && self.total_bytes < MAX_BATCH_BYTES {
-                let mut counter = ByteCounter::default();
-                serde_json::to_writer(&mut counter, &record)
-                    .expect("writing a JSON Value into ByteCounter cannot fail");
-                self.total_bytes += counter.0;
+                self.total_bytes += json::estimate_json_bytes(&record);
             }
             self.records.push(record);
         }
@@ -306,7 +286,7 @@ impl ExecutablePipeline {
         let source_stream_params = self.get_source_stream_params();
         let source_size: f64 = records
             .iter()
-            .map(|record| record.to_string().len() as f64)
+            .map(|record| json::estimate_json_bytes(record) as f64)
             .sum::<f64>()
             / config::SIZE_IN_MB;
 
@@ -950,6 +930,30 @@ async fn process_node(
                             }
                         };
                         flattened = false; // since apply_vrl_fn can produce unflattened data
+                        // Pre-flatten VRL output once before fan-out so
+                        // downstream nodes avoid redundant flatten calls.
+                        let record = if !record.is_null() && record.is_object() {
+                            if flatten::is_flat(&record) {
+                                flattened = true;
+                                record
+                            } else {
+                                match flatten::flatten_with_level(
+                                    record,
+                                    cfg.limit.ingest_flatten_level,
+                                ) {
+                                    Ok(flat) => {
+                                        flattened = true;
+                                        flat
+                                    }
+                                    Err(_) => {
+                                        // Let downstream nodes handle the error.
+                                        continue;
+                                    }
+                                }
+                            }
+                        } else {
+                            record
+                        };
                         send_to_children(
                             &mut child_senders,
                             PipelineItem {
@@ -1278,54 +1282,44 @@ async fn process_node(
 
 #[cfg(feature = "enterprise")]
 pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
-    for buffers in BATCH_BUFFERS.iter() {
-        let mut buffers = buffers.lock().await;
-        for (batch_key, buffer) in buffers.iter_mut() {
-        // let buffer_key = format!("{}:{}:{}:{}:{}", pipeline_id, remote_stream.org_id,
-        // remote_stream.destination_name, batch_key, "remote");
-        let key = batch_key.clone();
-        let key_parts = key.split(":").collect::<Vec<&str>>();
-        let pipeline_id = key_parts[0].to_string();
-        let org_id = key_parts[1].to_string();
-        let destination_name = key_parts[2].to_string();
-        let batch_key = key_parts[3].to_string();
-        // let stream_type = key_parts[4].to_string();
+    for shard in BATCH_BUFFERS.iter() {
+        // Collect eligible flushes under the lock, then release before async WAL writes.
+        let flush_jobs: Vec<(String, String, String, Vec<json::Value>)> = {
+            let mut buffers = shard.lock().await;
+            let mut jobs = Vec::new();
+            for (batch_key, buffer) in buffers.iter_mut() {
+                if buffer.should_flush() {
+                    let key_parts: Vec<&str> = batch_key.split(':').collect();
+                    let pipeline_id = key_parts[0].to_string();
+                    let org_id = key_parts[1].to_string();
+                    let destination_name = key_parts[2].to_string();
+                    let records_to_write = buffer.take_records();
+                    jobs.push((pipeline_id, org_id, destination_name, records_to_write));
+                }
+            }
+            jobs
+        }; // lock dropped here
 
-        let remote_stream = config::meta::stream::RemoteStreamParams {
-            org_id: org_id.clone().into(),
-            destination_name: destination_name.clone().into(),
-        };
-
-        let mut remote_stream_for_batch = remote_stream.clone();
-        remote_stream_for_batch.org_id = org_id.clone().into();
-
-        if buffer.should_flush() {
-            let records_to_write = buffer.take_records();
-
+        for (pipeline_id, org_id, destination_name, records_to_write) in flush_jobs {
+            let records_len = records_to_write.len();
             log::debug!(
-                "[Pipeline]: Flushing buffer for batch_key '{}' - writing {} records to WAL",
-                batch_key,
-                records_to_write.len()
+                "[Pipeline]: Flushing buffer - writing {records_len} records to WAL"
             );
 
-            // Create remote stream configuration with batch_key routing
-            let mut remote_stream_for_batch = remote_stream.clone();
-            remote_stream_for_batch.org_id = org_id.clone().into();
+            let remote_stream = config::meta::stream::RemoteStreamParams {
+                org_id: org_id.clone().into(),
+                destination_name: destination_name.clone().into(),
+            };
 
-            let records_len = records_to_write.len();
-
-            let writer = get_pipeline_wal_writer(&pipeline_id, remote_stream_for_batch).await?;
+            let writer = get_pipeline_wal_writer(&pipeline_id, remote_stream).await?;
             match writer.write_wal(records_to_write).await {
                 Err(e) => {
-                    let err_msg = format!(
-                        "DestinationNode error persisting data for batch_key '{batch_key}' to be ingested externally: {e}"
+                    log::error!(
+                        "DestinationNode error persisting data to be ingested externally: {e}"
                     );
-                    log::error!("{err_msg}");
                 }
                 Ok(data_size) => {
                     let data_size_mb = data_size as f64 / config::SIZE_IN_MB;
-
-                    // Report remote destination usage after successful WAL write
                     if data_size_mb > 0.0 {
                         let req_stats = config::meta::self_reporting::usage::RequestStats {
                             size: data_size_mb,
@@ -1333,22 +1327,19 @@ pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
                             response_time: 0.0,
                             ..config::meta::self_reporting::usage::RequestStats::default()
                         };
-
                         crate::service::self_reporting::report_request_usage_stats(
                             req_stats,
                             &org_id,
                             &destination_name,
-                            config::meta::stream::StreamType::Logs, /* Default to Logs for
-                                                                     * remote destination */
+                            config::meta::stream::StreamType::Logs,
                             config::meta::self_reporting::usage::UsageType::RemotePipeline,
-                            0, // No additional functions for remote destination
+                            0,
                             chrono::Utc::now().timestamp_micros(),
                         )
                         .await;
                     }
                 }
             }
-        }
         }
     }
 
