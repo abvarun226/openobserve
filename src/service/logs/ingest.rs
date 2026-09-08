@@ -119,8 +119,8 @@ pub async fn ingest(
     let executable_pipeline =
         crate::service::ingestion::get_stream_executable_pipeline(&stream_param).await;
     let mut stream_params = vec![stream_param];
-    let mut pipeline_inputs = Vec::with_capacity(stream_params.len());
-    let mut original_options = Vec::with_capacity(stream_params.len());
+    let mut pipeline_inputs = Vec::new();
+    let mut original_options = Vec::new();
     // End pipeline params construction
 
     if let Some(exec_pl) = &executable_pipeline {
@@ -214,6 +214,16 @@ pub async fn ingest(
     let mut size_by_stream = HashMap::new();
     let mut record_count: u32 = 0;
     let mut first_record_flat = false;
+
+    // Pre-size pipeline buffers from the known input record count.
+    if executable_pipeline.is_some() {
+        let hint = match &data {
+            IngestionData::JSON(v) => v.len(),
+            _ => 64,
+        };
+        pipeline_inputs.reserve(hint);
+        original_options.reserve(hint);
+    }
 
     // Cache per-stream flags before the loop to avoid HashMap lookups per record
     let uds_fields = user_defined_schema_map
