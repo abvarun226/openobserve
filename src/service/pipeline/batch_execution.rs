@@ -14,9 +14,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
+#[cfg(feature = "enterprise")]
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -47,7 +52,9 @@ use crate::{
     common::infra::config::QUERY_FUNCTIONS,
     service::{
         alerts::{ConditionExt, ConditionGroupExt},
-        ingestion::{apply_vrl_fn, compile_vrl_function},
+        ingestion::{
+            VrlContext, apply_vrl_fn_on_vrl, apply_vrl_fn_with_context, compile_vrl_function,
+        },
         self_reporting::publish_error,
     },
 };
@@ -62,10 +69,17 @@ struct BatchBuffer {
 }
 
 #[cfg(feature = "enterprise")]
+const MAX_BATCH_SIZE: usize = 50;
+#[cfg(feature = "enterprise")]
+const MAX_BATCH_BYTES: usize = 32 * 1024;
+#[cfg(feature = "enterprise")]
+const MAX_BATCH_TIME_MS: u64 = 5000;
+
+#[cfg(feature = "enterprise")]
 impl BatchBuffer {
     fn new() -> Self {
         Self {
-            records: Vec::new(),
+            records: Vec::with_capacity(MAX_BATCH_SIZE),
             total_bytes: 0,
             last_write: Instant::now(),
         }
@@ -73,16 +87,14 @@ impl BatchBuffer {
 
     fn add_records(&mut self, new_records: Vec<json::Value>) {
         for record in new_records {
-            self.total_bytes += record.to_string().len();
+            if self.records.len() < MAX_BATCH_SIZE && self.total_bytes < MAX_BATCH_BYTES {
+                self.total_bytes += json::estimate_json_bytes(&record);
+            }
             self.records.push(record);
         }
     }
 
     fn should_flush(&self) -> bool {
-        const MAX_BATCH_SIZE: usize = 50; // Flush after 50 records
-        const MAX_BATCH_BYTES: usize = 32 * 1024; // Or 32KB
-        const MAX_BATCH_TIME_MS: u64 = 5000; // Or 5 seconds
-
         self.records.len() >= MAX_BATCH_SIZE
             || self.total_bytes >= MAX_BATCH_BYTES
             || self.last_write.elapsed() >= Duration::from_millis(MAX_BATCH_TIME_MS)
@@ -91,13 +103,22 @@ impl BatchBuffer {
     fn take_records(&mut self) -> Vec<json::Value> {
         self.last_write = Instant::now();
         self.total_bytes = 0;
-        std::mem::take(&mut self.records)
+        std::mem::replace(&mut self.records, Vec::with_capacity(MAX_BATCH_SIZE))
     }
 }
 
+const BATCH_BUFFER_SHARDS: usize = 16;
+
 #[cfg(feature = "enterprise")]
-static BATCH_BUFFERS: Lazy<Mutex<HashMap<String, BatchBuffer>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static BATCH_BUFFERS: Lazy<[Mutex<HashMap<String, BatchBuffer>>; BATCH_BUFFER_SHARDS]> =
+    Lazy::new(|| std::array::from_fn(|_| Mutex::new(HashMap::new())));
+
+#[cfg(feature = "enterprise")]
+fn batch_buffer_shard(key: &str) -> &'static Mutex<HashMap<String, BatchBuffer>> {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    &BATCH_BUFFERS[hasher.finish() as usize % BATCH_BUFFER_SHARDS]
+}
 
 static DYNAMIC_STREAM_NAME_PATTERN: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"\{([^}]+)\}").unwrap());
@@ -146,7 +167,7 @@ pub struct ExecutablePipeline {
     source_node_id: String,
     sorted_nodes: Vec<String>,
     vrl_map: HashMap<String, (VRLResultResolver, bool)>,
-    node_map: HashMap<String, ExecutableNode>,
+    node_map: HashMap<String, Arc<ExecutableNode>>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +245,10 @@ impl ExecutablePipeline {
             }
         };
         let source_node_id = sorted_nodes[0].to_owned();
+        let node_map = node_map
+            .into_iter()
+            .map(|(node_id, node)| (node_id, Arc::new(node)))
+            .collect();
 
         Ok(Self {
             id: pipeline.id.to_string(),
@@ -260,7 +285,7 @@ impl ExecutablePipeline {
         let source_stream_params = self.get_source_stream_params();
         let source_size: f64 = records
             .iter()
-            .map(|record| record.to_string().len() as f64)
+            .map(|record| json::estimate_json_bytes(record) as f64)
             .sum::<f64>()
             / config::SIZE_IN_MB;
 
@@ -275,19 +300,21 @@ impl ExecutablePipeline {
             );
         }
 
+        let channel_capacity = batch_size.min(64);
+
         // result_channel
         let (result_sender, mut result_receiver) =
-            channel::<(usize, StreamParams, Value)>(batch_size);
+            channel::<(usize, StreamParams, Value)>(channel_capacity);
 
         // error_channel
         let (error_sender, mut error_receiver) =
-            channel::<(String, String, String, Option<String>)>(batch_size);
+            channel::<(String, String, String, Option<String>)>(channel_capacity);
 
         let mut node_senders = HashMap::new();
         let mut node_receivers = HashMap::new();
 
         for node_id in &self.sorted_nodes {
-            let (sender, receiver) = channel::<PipelineItem>(batch_size);
+            let (sender, receiver) = channel::<PipelineItem>(channel_capacity);
             node_senders.insert(node_id.to_string(), sender);
             node_receivers.insert(node_id.to_string(), receiver);
         }
@@ -308,7 +335,9 @@ impl ExecutablePipeline {
             let error_sender_cp = error_sender.clone();
             let vrl_runtime: Option<(VRLResultResolver, bool)> = self.vrl_map.get(node_id).cloned();
             let pipeline_name = pipeline_name.clone();
-            let stream_name = stream_name.clone();
+            let stream_name = matches!(&node.node_data, NodeData::Function(_))
+                .then(|| stream_name.clone())
+                .flatten();
             let inv_id_cp = inv_id.to_string();
 
             // WARN: Do not change. Processing node can only be done in a task, as the internals of
@@ -373,7 +402,7 @@ impl ExecutablePipeline {
         for (idx, record) in records.into_iter().enumerate() {
             let pipeline_item = PipelineItem {
                 idx,
-                record,
+                record: PipelineRecord::Owned(record),
                 flattened,
             };
             if let Err(send_err) = source_sender.send(pipeline_item).await {
@@ -588,9 +617,51 @@ impl Default for ExecutablePipelineBulkInputs {
 }
 
 #[derive(Debug, Clone)]
+enum PipelineRecord {
+    Owned(Value),
+    Shared(Arc<Value>),
+    /// VRL-native value: avoids redundant serde_json ↔ vrl conversions
+    /// between consecutive function nodes.
+    VrlOwned(vrl::value::Value),
+    VrlShared(Arc<vrl::value::Value>),
+}
+
+impl PipelineRecord {
+    fn into_owned(self) -> Value {
+        match self {
+            Self::Owned(record) => record,
+            Self::Shared(record) => Arc::unwrap_or_clone(record),
+            Self::VrlOwned(record) => record.try_into().unwrap_or_default(),
+            Self::VrlShared(record) => {
+                Arc::unwrap_or_clone(record).try_into().unwrap_or_default()
+            }
+        }
+    }
+
+    fn into_shared(self) -> Self {
+        match self {
+            Self::Owned(record) => Self::Shared(Arc::new(record)),
+            Self::VrlOwned(record) => Self::VrlShared(Arc::new(record)),
+            shared => shared,
+        }
+    }
+
+    /// Convert to a mutable vrl::value::Value for VRL execution.
+    /// Avoids conversion when the record is already in VRL format.
+    fn into_vrl(self) -> vrl::value::Value {
+        match self {
+            Self::Owned(record) => vrl::value::Value::from(&record),
+            Self::Shared(record) => vrl::value::Value::from(record.as_ref()),
+            Self::VrlOwned(record) => record,
+            Self::VrlShared(record) => Arc::unwrap_or_clone(record),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct PipelineItem {
     idx: usize,
-    record: Value,
+    record: PipelineRecord,
     flattened: bool,
 }
 
@@ -599,7 +670,7 @@ async fn process_node(
     pipeline_id: String,
     node_idx: usize,
     org_id: String,
-    node: ExecutableNode,
+    node: Arc<ExecutableNode>,
     mut receiver: Receiver<PipelineItem>,
     mut child_senders: Vec<Sender<PipelineItem>>,
     vrl_runtime: Option<(VRLResultResolver, bool)>,
@@ -631,9 +702,10 @@ async fn process_node(
                 while let Some(pipeline_item) = receiver.recv().await {
                     let PipelineItem {
                         idx,
-                        mut record,
+                        record,
                         flattened,
                     } = pipeline_item;
+                    let mut record = record.into_owned();
                     if !flattened && !record.is_null() && record.is_object() {
                         let flatten_timer = Instant::now();
                         let flatten_res =
@@ -720,9 +792,10 @@ async fn process_node(
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
                     idx,
-                    mut record,
+                    record,
                     mut flattened,
                 } = pipeline_item;
+                let mut record = record.into_owned();
                 // value must be flattened before condition params can take effect
                 if !flattened && !record.is_null() && record.is_object() {
                     let flatten_timer = Instant::now();
@@ -768,7 +841,7 @@ async fn process_node(
                         &mut child_senders,
                         PipelineItem {
                             idx,
-                            record,
+                            record: PipelineRecord::Owned(record),
                             flattened,
                         },
                         "ConditionNode",
@@ -783,6 +856,8 @@ async fn process_node(
             log::debug!("[Pipeline]: func node {node_idx} starts processing");
             let mut runtime = crate::service::ingestion::init_functions_runtime();
             let stream_name = stream_name.unwrap_or("pipeline".to_string());
+            let vrl_context = VrlContext::new(&org_id, &stream_name);
+            let mut vrl_scratch = vrl_context.clone();
             let mut result_array_records = Vec::new();
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
@@ -791,85 +866,117 @@ async fn process_node(
                     mut flattened,
                 } = pipeline_item;
                 if let Some((vrl_runtime, is_result_array_vrl)) = &vrl_runtime {
-                    if func_params.after_flatten
-                        && !flattened
-                        && !record.is_null()
-                        && record.is_object()
-                    {
-                        let flatten_timer = Instant::now();
-                        let flatten_res =
-                            flatten::flatten_with_level(record, cfg.limit.ingest_flatten_level);
-                        busy += flatten_timer.elapsed();
-                        record = match flatten_res {
-                            Ok(flattened) => flattened,
-                            Err(e) => {
-                                let err_msg = format!("FunctionNode error with flattening: {e}");
-                                let err_msg = err_msg.get(0..500).unwrap_or(&err_msg);
-                                if let Err(send_err) = error_sender
-                                    .send((
-                                        node.id.to_string(),
-                                        node.node_type(),
-                                        err_msg.to_owned(),
-                                        Some(func_params.name.to_owned()),
-                                    ))
-                                    .await
-                                {
-                                    log::error!(
-                                        "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
-                                    );
-                                    break;
+                    if func_params.after_flatten {
+                        let mut owned_record = record.into_owned();
+                        if !flattened && !owned_record.is_null() && owned_record.is_object() {
+                            let flatten_timer = Instant::now();
+                            let flatten_res = flatten::flatten_with_level(
+                                owned_record,
+                                cfg.limit.ingest_flatten_level,
+                            );
+                            busy += flatten_timer.elapsed();
+                            owned_record = match flatten_res {
+                                Ok(flattened) => flattened,
+                                Err(e) => {
+                                    let err_msg =
+                                        format!("FunctionNode error with flattening: {e}");
+                                    let err_msg = err_msg.get(0..500).unwrap_or(&err_msg);
+                                    if let Err(send_err) = error_sender
+                                        .send((
+                                            node.id.to_string(),
+                                            node.node_type(),
+                                            err_msg.to_owned(),
+                                            Some(func_params.name.to_owned()),
+                                        ))
+                                        .await
+                                    {
+                                        log::error!(
+                                            "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
+                                        );
+                                        break;
+                                    }
+                                    continue;
                                 }
-                                continue;
-                            }
-                        };
+                            };
+                        }
+                        record = PipelineRecord::Owned(owned_record);
                     }
                     if !is_result_array_vrl {
                         let vrl_timer = Instant::now();
-                        let vrl_res = apply_vrl_fn(
+                        // Convert to VRL format (free if already VrlOwned)
+                        let vrl_val = record.into_vrl();
+                        let (vrl_res, vrl_err) = apply_vrl_fn_on_vrl(
                             &mut runtime,
                             vrl_runtime,
-                            record,
+                            vrl_val,
                             &org_id,
                             std::slice::from_ref(&stream_name),
+                            &vrl_context,
+                            &mut vrl_scratch,
                         );
                         busy += vrl_timer.elapsed();
-                        record = match vrl_res {
-                            (res, None) => res,
-                            (res, Some(error)) => {
-                                let err_msg = format!(
-                                    "FunctionNode error: {}",
-                                    error.get(0..500).unwrap_or(&error)
+                        if let Some(error) = vrl_err {
+                            let err_msg = format!(
+                                "FunctionNode error: {}",
+                                error.get(0..500).unwrap_or(&error)
+                            );
+                            if let Err(send_err) = error_sender
+                                .send((
+                                    node.id.to_string(),
+                                    node.node_type(),
+                                    err_msg.to_owned(),
+                                    Some(func_params.name.to_owned()),
+                                ))
+                                .await
+                            {
+                                log::error!(
+                                    "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
                                 );
-                                if let Err(send_err) = error_sender
-                                    .send((
-                                        node.id.to_string(),
-                                        node.node_type(),
-                                        err_msg.to_owned(),
-                                        Some(func_params.name.to_owned()),
-                                    ))
-                                    .await
-                                {
-                                    log::error!(
-                                        "[Pipeline] {pipeline_name} : FunctionNode failed sending errors for collection caused by: {send_err}"
-                                    );
-                                    break;
-                                }
-                                res
+                                break;
                             }
+                        }
+                        // Check VRL-native flatness to set the flattened
+                        // flag, preventing downstream flatten_with_level
+                        // calls on the 12 RemoteStream nodes.
+                        flattened = match &vrl_res {
+                            vrl::value::Value::Object(map) => {
+                                !map.values().any(|v| v.is_object() || v.is_array())
+                            }
+                            _ => true,
                         };
-                        flattened = false; // since apply_vrl_fn can produce unflattened data
+                        // If not flat, convert to serde_json and flatten
+                        // once before fan-out.
+                        let out_record = if !flattened {
+                            match vrl_res.try_into() {
+                                Ok(serde_val) => {
+                                    match flatten::flatten_with_level(
+                                        serde_val,
+                                        cfg.limit.ingest_flatten_level,
+                                    ) {
+                                        Ok(flat) => {
+                                            flattened = true;
+                                            PipelineRecord::Owned(flat)
+                                        }
+                                        Err(_) => continue,
+                                    }
+                                }
+                                Err(_) => continue,
+                            }
+                        } else {
+                            PipelineRecord::VrlOwned(vrl_res)
+                        };
                         send_to_children(
                             &mut child_senders,
                             PipelineItem {
                                 idx,
-                                record,
+                                record: out_record,
                                 flattened,
                             },
                             "FunctionNode",
                         )
                         .await;
                     } else {
-                        result_array_records.push(record);
+                        result_array_records.push(record.into_owned());
                     }
                 }
                 count += 1;
@@ -878,12 +985,14 @@ async fn process_node(
                 && let Some((vrl_runtime, true)) = &vrl_runtime
             {
                 let vrl_arr_timer = Instant::now();
-                let vrl_arr_res = apply_vrl_fn(
+                let vrl_arr_res = apply_vrl_fn_with_context(
                     &mut runtime,
                     vrl_runtime,
                     json::Value::Array(result_array_records),
                     &org_id,
                     std::slice::from_ref(&stream_name),
+                    &vrl_context,
+                    &mut vrl_scratch,
                 );
                 busy += vrl_arr_timer.elapsed();
                 let result = match vrl_arr_res {
@@ -917,7 +1026,7 @@ async fn process_node(
                         &mut child_senders,
                         PipelineItem {
                             idx: usize::MAX,
-                            record: record.clone(),
+                            record: PipelineRecord::Owned(record.clone()),
                             flattened: false,
                         },
                         "FunctionNode",
@@ -938,7 +1047,9 @@ async fn process_node(
         }
         #[cfg(feature = "enterprise")]
         NodeData::RemoteStream(remote_stream) => {
-            let mut records = vec![];
+            let mut records = Vec::with_capacity(64);
+            let mut uniform_batch_key = None;
+            let mut grouped_records = None;
             log::debug!(
                 "[Pipeline]: Destination node {node_idx} starts processing, remote_stream : {remote_stream:?}"
             );
@@ -947,10 +1058,9 @@ async fn process_node(
             let max_ts = now + cfg.limit.ingest_allowed_in_future_micro;
             while let Some(pipeline_item) = receiver.recv().await {
                 let PipelineItem {
-                    mut record,
-                    flattened,
-                    ..
+                    record, flattened, ..
                 } = pipeline_item;
+                let mut record = record.into_owned();
                 // handle timestamp before sending to remote_write service
                 if !flattened && !record.is_null() && record.is_object() {
                     let flatten_timer = Instant::now();
@@ -992,36 +1102,62 @@ async fn process_node(
                         continue;
                     }
 
-                    records.push(record);
+                    let record_batch_key = record
+                        .get("batch_key")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("default");
+                    if let Some(groups) = &mut grouped_records {
+                        let groups: &mut HashMap<String, Vec<json::Value>> = groups;
+                        groups
+                            .entry(record_batch_key.to_string())
+                            .or_default()
+                            .push(record);
+                    } else {
+                        match uniform_batch_key.as_deref() {
+                            None => {
+                                uniform_batch_key = Some(if record_batch_key == "default" {
+                                    Cow::Borrowed("default")
+                                } else {
+                                    Cow::Owned(record_batch_key.to_string())
+                                });
+                                records.push(record);
+                            }
+                            Some(batch_key) if batch_key == record_batch_key => {
+                                records.push(record);
+                            }
+                            Some(_) => {
+                                let mut groups = HashMap::new();
+                                groups.insert(
+                                    uniform_batch_key.take().unwrap().into_owned(),
+                                    std::mem::take(&mut records),
+                                );
+                                groups
+                                    .entry(record_batch_key.to_string())
+                                    .or_default()
+                                    .push(record);
+                                grouped_records = Some(groups);
+                            }
+                        }
+                    }
                     count += 1;
                 }
             }
 
-            log::debug!(
-                "[Pipeline]: RemoteStream node processed {} records",
-                records.len()
-            );
-            if !records.is_empty() {
-                // Group records by batch_key for routing to different remote streams
-                let mut records_by_batch_key: HashMap<String, Vec<json::Value>> = HashMap::new();
-
-                for record in records {
-                    // Extract batch_key from record, fallback to "default" if not present
-                    let batch_key = record
-                        .get("batch_key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("default")
-                        .to_string();
-
-                    records_by_batch_key
-                        .entry(batch_key)
-                        .or_default()
-                        .push(record);
-                }
+            log::debug!("[Pipeline]: RemoteStream node processed {count} records");
+            if count != 0 {
+                let batch_key_count = grouped_records.as_ref().map_or(1, HashMap::len);
+                let records_by_batch_key = uniform_batch_key
+                    .zip(Some(records))
+                    .into_iter()
+                    .chain(
+                        grouped_records
+                            .into_iter()
+                            .flatten()
+                            .map(|(batch_key, records)| (Cow::Owned(batch_key), records)),
+                    );
 
                 log::debug!(
-                    "[Pipeline]: Grouped records into {} batch keys",
-                    records_by_batch_key.len()
+                    "[Pipeline]: Grouped records into {batch_key_count} batch keys"
                 );
 
                 // Process each batch_key group separately
@@ -1037,25 +1173,30 @@ async fn process_node(
                     );
 
                     // Add records to the accumulating buffer and check if we should flush
-                    let mut buffers = BATCH_BUFFERS.lock().await;
-                    let buffer = buffers
-                        .entry(buffer_key.clone())
-                        .or_insert_with(BatchBuffer::new);
-
+                    let mut buffers = batch_buffer_shard(&buffer_key).lock().await;
+                    let buffer = buffers.entry(buffer_key).or_insert_with(BatchBuffer::new);
                     let initial_record_count = buffer.records.len();
-                    buffer.add_records(batch_records);
+                    let records_to_write = if initial_record_count == 0
+                        && batch_records.len() >= MAX_BATCH_SIZE
+                    {
+                        buffer.last_write = Instant::now();
+                        Some(batch_records)
+                    } else {
+                        buffer.add_records(batch_records);
 
-                    log::debug!(
-                        "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
-                        buffer.records.len() - initial_record_count,
-                        buffer.records.len(),
-                        buffer.total_bytes
-                    );
+                        log::debug!(
+                            "[Pipeline]: Added {} records to buffer for batch_key '{batch_key}', total: {} records, {} bytes",
+                            buffer.records.len() - initial_record_count,
+                            buffer.records.len(),
+                            buffer.total_bytes
+                        );
+
+                        buffer.should_flush().then(|| buffer.take_records())
+                    };
+                    drop(buffers); // Release the lock before async operations
 
                     // Check if buffer should be flushed to WAL
-                    if buffer.should_flush() {
-                        let records_to_write = buffer.take_records();
-                        drop(buffers); // Release the lock before async operations
+                    if let Some(records_to_write) = records_to_write {
 
                         log::debug!(
                             "[Pipeline]: Flushing buffer for batch_key '{}' - writing {} records to WAL",
@@ -1152,54 +1293,44 @@ async fn process_node(
 
 #[cfg(feature = "enterprise")]
 pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
-    let mut buffers = BATCH_BUFFERS.lock().await;
+    for shard in BATCH_BUFFERS.iter() {
+        // Collect eligible flushes under the lock, then release before async WAL writes.
+        let flush_jobs: Vec<(String, String, String, Vec<json::Value>)> = {
+            let mut buffers = shard.lock().await;
+            let mut jobs = Vec::new();
+            for (batch_key, buffer) in buffers.iter_mut() {
+                if buffer.should_flush() {
+                    let key_parts: Vec<&str> = batch_key.split(':').collect();
+                    let pipeline_id = key_parts[0].to_string();
+                    let org_id = key_parts[1].to_string();
+                    let destination_name = key_parts[2].to_string();
+                    let records_to_write = buffer.take_records();
+                    jobs.push((pipeline_id, org_id, destination_name, records_to_write));
+                }
+            }
+            jobs
+        }; // lock dropped here
 
-    for (batch_key, buffer) in buffers.iter_mut() {
-        // let buffer_key = format!("{}:{}:{}:{}:{}", pipeline_id, remote_stream.org_id,
-        // remote_stream.destination_name, batch_key, "remote");
-        let key = batch_key.clone();
-        let key_parts = key.split(":").collect::<Vec<&str>>();
-        let pipeline_id = key_parts[0].to_string();
-        let org_id = key_parts[1].to_string();
-        let destination_name = key_parts[2].to_string();
-        let batch_key = key_parts[3].to_string();
-        // let stream_type = key_parts[4].to_string();
-
-        let remote_stream = config::meta::stream::RemoteStreamParams {
-            org_id: org_id.clone().into(),
-            destination_name: destination_name.clone().into(),
-        };
-
-        let mut remote_stream_for_batch = remote_stream.clone();
-        remote_stream_for_batch.org_id = org_id.clone().into();
-
-        if buffer.should_flush() {
-            let records_to_write = buffer.take_records();
-
+        for (pipeline_id, org_id, destination_name, records_to_write) in flush_jobs {
+            let records_len = records_to_write.len();
             log::debug!(
-                "[Pipeline]: Flushing buffer for batch_key '{}' - writing {} records to WAL",
-                batch_key,
-                records_to_write.len()
+                "[Pipeline]: Flushing buffer - writing {records_len} records to WAL"
             );
 
-            // Create remote stream configuration with batch_key routing
-            let mut remote_stream_for_batch = remote_stream.clone();
-            remote_stream_for_batch.org_id = org_id.clone().into();
+            let remote_stream = config::meta::stream::RemoteStreamParams {
+                org_id: org_id.clone().into(),
+                destination_name: destination_name.clone().into(),
+            };
 
-            let records_len = records_to_write.len();
-
-            let writer = get_pipeline_wal_writer(&pipeline_id, remote_stream_for_batch).await?;
+            let writer = get_pipeline_wal_writer(&pipeline_id, remote_stream).await?;
             match writer.write_wal(records_to_write).await {
                 Err(e) => {
-                    let err_msg = format!(
-                        "DestinationNode error persisting data for batch_key '{batch_key}' to be ingested externally: {e}"
+                    log::error!(
+                        "DestinationNode error persisting data to be ingested externally: {e}"
                     );
-                    log::error!("{err_msg}");
                 }
                 Ok(data_size) => {
                     let data_size_mb = data_size as f64 / config::SIZE_IN_MB;
-
-                    // Report remote destination usage after successful WAL write
                     if data_size_mb > 0.0 {
                         let req_stats = config::meta::self_reporting::usage::RequestStats {
                             size: data_size_mb,
@@ -1207,15 +1338,13 @@ pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
                             response_time: 0.0,
                             ..config::meta::self_reporting::usage::RequestStats::default()
                         };
-
                         crate::service::self_reporting::report_request_usage_stats(
                             req_stats,
                             &org_id,
                             &destination_name,
-                            config::meta::stream::StreamType::Logs, /* Default to Logs for
-                                                                     * remote destination */
+                            config::meta::stream::StreamType::Logs,
                             config::meta::self_reporting::usage::UsageType::RemotePipeline,
-                            0, // No additional functions for remote destination
+                            0,
                             chrono::Utc::now().timestamp_micros(),
                         )
                         .await;
@@ -1224,7 +1353,6 @@ pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
             }
         }
     }
-    drop(buffers); // Release the lock before async operations
 
     Ok(())
 }
@@ -1235,19 +1363,32 @@ async fn send_to_children(
     node_type: &str,
 ) {
     if child_senders.len() == 1 {
-        // HACK to avoid cloning
+        // A waited single-child send preserves pipeline pacing.
         if let Err(send_err) = child_senders[0].send(item).await {
             log::error!(
                 "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
             );
         }
     } else {
+        let item = PipelineItem {
+            record: item.record.into_shared(),
+            ..item
+        };
         for child_sender in child_senders.iter_mut() {
-            if let Err(send_err) = child_sender.send(item.clone()).await {
-                log::error!(
-                    "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
-                );
-                break;
+            match child_sender.try_send(item.clone()) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
+                    if let Err(send_err) = child_sender.send(item).await {
+                        log::error!(
+                            "[Pipeline]: {node_type} errors sending record to its children caused by: {send_err}"
+                        );
+                        break;
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    log::error!("[Pipeline]: {node_type} child channel closed");
+                    break;
+                }
             }
         }
     }

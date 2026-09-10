@@ -14,6 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     io::Write,
     sync::{Arc, atomic::Ordering},
@@ -96,6 +97,26 @@ pub fn compile_vrl_function(func: &str, org_id: &str) -> Result<VRLRuntimeConfig
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub struct VrlContext {
+    metadata: vrl::value::Value,
+    secrets: vrl::value::Secrets,
+}
+
+impl VrlContext {
+    pub fn new(org_id: &str, stream_name: &str) -> Self {
+        let mut metadata = vrl::value::Value::from(BTreeMap::new());
+        metadata.insert("org_id", vrl::value::Value::from(org_id.to_string()));
+        metadata.insert(
+            "stream_name",
+            vrl::value::Value::from(stream_name.to_string()),
+        );
+        let mut secrets = vrl::value::Secrets::new();
+        secrets.insert(stream_name.to_string(), stream_name.to_string());
+        Self { metadata, secrets }
+    }
+}
+
 pub fn apply_vrl_fn(
     runtime: &mut Runtime,
     vrl_runtime: &VRLResultResolver,
@@ -103,21 +124,76 @@ pub fn apply_vrl_fn(
     org_id: &str,
     stream_name: &[String],
 ) -> (Value, Option<String>) {
-    let mut metadata = vrl::value::Value::from(BTreeMap::new());
-    metadata.insert("org_id", vrl::value::Value::from(org_id.to_string()));
-    metadata.insert(
-        "stream_name",
-        vrl::value::Value::from(stream_name[0].clone()),
-    );
-    let mut target = TargetValueRef {
-        value: &mut vrl::value::Value::from(&row),
-        metadata: &mut metadata,
-        secrets: &mut vrl::value::Secrets::new(),
-    };
+    let mut context = VrlContext::new(org_id, &stream_name[0]);
+    apply_vrl_fn_inner(
+        runtime,
+        vrl_runtime,
+        Cow::Owned(row),
+        org_id,
+        stream_name,
+        &mut context,
+    )
+}
 
-    target
-        .secrets
-        .insert(stream_name[0].clone(), stream_name[0].clone());
+pub fn apply_vrl_fn_with_context(
+    runtime: &mut Runtime,
+    vrl_runtime: &VRLResultResolver,
+    row: Value,
+    org_id: &str,
+    stream_name: &[String],
+    context: &VrlContext,
+    scratch: &mut VrlContext,
+) -> (Value, Option<String>) {
+    let result = apply_vrl_fn_inner(
+        runtime,
+        vrl_runtime,
+        Cow::Owned(row),
+        org_id,
+        stream_name,
+        scratch,
+    );
+    if scratch != context {
+        scratch.clone_from(context);
+    }
+    result
+}
+
+pub fn apply_vrl_fn_with_context_ref(
+    runtime: &mut Runtime,
+    vrl_runtime: &VRLResultResolver,
+    row: &Value,
+    org_id: &str,
+    stream_name: &[String],
+    context: &VrlContext,
+    scratch: &mut VrlContext,
+) -> (Value, Option<String>) {
+    let result = apply_vrl_fn_inner(
+        runtime,
+        vrl_runtime,
+        Cow::Borrowed(row),
+        org_id,
+        stream_name,
+        scratch,
+    );
+    if scratch != context {
+        scratch.clone_from(context);
+    }
+    result
+}
+
+fn apply_vrl_fn_inner(
+    runtime: &mut Runtime,
+    vrl_runtime: &VRLResultResolver,
+    row: Cow<'_, Value>,
+    org_id: &str,
+    stream_name: &[String],
+    context: &mut VrlContext,
+) -> (Value, Option<String>) {
+    let mut target = TargetValueRef {
+        value: &mut vrl::value::Value::from(row.as_ref()),
+        metadata: &mut context.metadata,
+        secrets: &mut context.secrets,
+    };
 
     let timezone = vrl::compiler::TimeZone::Local;
     let result = match vrl::compiler::VrlRuntime::default() {
@@ -143,7 +219,7 @@ pub fn apply_vrl_fn(
                 );
                 // Return only error message without sensitive record data
                 let clean_err = format!("{org_id}/{stream_name:?} vrl failed: {err:?}");
-                (row, Some(clean_err))
+                (row.into_owned(), Some(clean_err))
             }
         },
         Err(err) => {
@@ -161,7 +237,52 @@ pub fn apply_vrl_fn(
             );
             // Return only error message without sensitive record data
             let clean_err = format!("{org_id}/{stream_name:?} vrl runtime error: {err:?}");
-            (row, Some(clean_err))
+            (row.into_owned(), Some(clean_err))
+        }
+    }
+}
+
+/// Run VRL directly on a vrl::value::Value, avoiding serde_json conversions.
+/// Returns the VRL result as vrl::value::Value. On error, returns the original
+/// value and an error message.
+pub fn apply_vrl_fn_on_vrl(
+    runtime: &mut Runtime,
+    vrl_runtime: &VRLResultResolver,
+    mut vrl_val: vrl::value::Value,
+    org_id: &str,
+    stream_name: &[String],
+    context: &VrlContext,
+    scratch: &mut VrlContext,
+) -> (vrl::value::Value, Option<String>) {
+    let mut target = TargetValueRef {
+        value: &mut vrl_val,
+        metadata: &mut scratch.metadata,
+        secrets: &mut scratch.secrets,
+    };
+
+    let timezone = vrl::compiler::TimeZone::Local;
+    let result = match vrl::compiler::VrlRuntime::default() {
+        vrl::compiler::VrlRuntime::Ast => {
+            runtime.resolve(&mut target, &vrl_runtime.program, &timezone)
+        }
+    };
+    // Reset scratch if VRL mutated metadata or secrets
+    if scratch != context {
+        scratch.clone_from(context);
+    }
+    match result {
+        Ok(res) => (res, None),
+        Err(err) => {
+            metrics::INGEST_ERRORS
+                .with_label_values(&[
+                    org_id,
+                    StreamType::Logs.as_str(),
+                    &format!("{stream_name:?}"),
+                    TRANSFORM_FAILED,
+                ])
+                .inc();
+            let clean_err = format!("{org_id}/{stream_name:?} vrl runtime error: {err:?}");
+            (vrl_val, Some(clean_err))
         }
     }
 }
