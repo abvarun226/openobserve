@@ -164,6 +164,33 @@ pub static INGEST_PARQUET_FILES: Lazy<IntGaugeVec> = Lazy::new(|| {
     )
     .expect("Metric created")
 });
+pub static INGEST_WAL_SEARCHING_FILES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "ingest_wal_searching_files",
+            "Number of wal files locked by in-flight searches on the ingester.".to_owned()
+                + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &[],
+    )
+    .expect("Metric created")
+});
+pub static INGEST_WAL_PENDING_DELETE_FILES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "ingest_wal_pending_delete_files",
+            "Number of uploaded wal files on the ingester still awaiting local deletion."
+                .to_owned()
+                + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &[],
+    )
+    .expect("Metric created")
+});
 pub static INGEST_WAL_WRITE_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
     IntCounterVec::new(
         Opts::new(
@@ -1143,6 +1170,57 @@ pub static QUERY_DISK_CACHE_MISS_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Metric created")
 });
 
+pub static QUERY_DISK_CACHE_INLINE_DOWNLOAD_FILES_CONSIDERED: Lazy<IntCounterVec> =
+    Lazy::new(|| {
+        IntCounterVec::new(
+            Opts::new(
+                "query_disk_cache_inline_download_files_considered",
+                "query disk cache inline download files considered".to_owned() + HELP_SUFFIX,
+            )
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+            &["file_type"],
+        )
+        .expect("Metric created")
+    });
+pub static QUERY_DISK_CACHE_INLINE_DOWNLOAD_FILES_FETCHED: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "query_disk_cache_inline_download_files_fetched",
+            "query disk cache inline download files fetched".to_owned() + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["file_type", "status"],
+    )
+    .expect("Metric created")
+});
+pub static QUERY_DISK_CACHE_INLINE_DOWNLOAD_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "query_disk_cache_inline_download_bytes",
+            "query disk cache inline download bytes".to_owned() + HELP_SUFFIX,
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["file_type"],
+    )
+    .expect("Metric created")
+});
+pub static QUERY_DISK_CACHE_INLINE_DOWNLOAD_DURATION_SECONDS: Lazy<HistogramVec> =
+    Lazy::new(|| {
+        HistogramVec::new(
+            HistogramOpts::new(
+                "query_disk_cache_inline_download_duration_seconds",
+                "query disk cache inline download duration in seconds".to_owned() + HELP_SUFFIX,
+            )
+            .namespace(NAMESPACE)
+            .const_labels(create_const_labels()),
+            &["file_type"],
+        )
+        .expect("Metric created")
+    });
+
 // file downloader metrics
 pub static FILE_DOWNLOADER_NORMAL_QUEUE_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     IntGaugeVec::new(
@@ -1363,6 +1441,88 @@ pub static QUERY_AGGREGATION_CACHE_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
         .namespace(NAMESPACE)
         .const_labels(create_const_labels()),
         &[],
+    )
+    .expect("Metric created")
+});
+
+// metrics for generic bytes cache
+pub static BYTES_CACHE_MEMORY_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "bytes_cache_memory_size",
+            "Total memory size (bytes) of a bytes cache",
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["tag"],
+    )
+    .expect("Metric created")
+});
+
+pub static BYTES_CACHE_ENTRY_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "bytes_cache_entry_count",
+            "Number of entries in a bytes cache",
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["tag"],
+    )
+    .expect("Metric created")
+});
+
+pub static BYTES_CACHE_GC_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    HistogramVec::new(
+        HistogramOpts::new(
+            "bytes_cache_gc_time",
+            "Time spent per GC run for a bytes cache",
+        )
+        .namespace(NAMESPACE)
+        .buckets(vec![
+            0.2, 0.5, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0,
+        ])
+        .const_labels(create_const_labels()),
+        &["tag"],
+    )
+    .expect("Metric created")
+});
+
+pub static BYTES_CACHE_GC_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "bytes_cache_gc_count",
+            "Total number of GC runs of a bytes cache",
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["tag"],
+    )
+    .expect("Metric created")
+});
+
+pub static BYTES_CACHE_HITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "bytes_cache_hits_total",
+            "Total number of hits of a bytes cache",
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["tag"],
+    )
+    .expect("Metric created")
+});
+
+pub static BYTES_CACHE_MISS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "bytes_cache_miss_total",
+            "Total number of misses of a bytes cache",
+        )
+        .namespace(NAMESPACE)
+        .const_labels(create_const_labels()),
+        &["tag"],
     )
     .expect("Metric created")
 });
@@ -1688,6 +1848,12 @@ fn register_metrics(registry: &Registry) {
         .register(Box::new(INGEST_PARQUET_FILES.clone()))
         .expect("Metric registered");
     registry
+        .register(Box::new(INGEST_WAL_SEARCHING_FILES.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(INGEST_WAL_PENDING_DELETE_FILES.clone()))
+        .expect("Metric registered");
+    registry
         .register(Box::new(INGEST_WAL_WRITE_BYTES.clone()))
         .expect("Metric registered");
     registry
@@ -1954,6 +2120,24 @@ fn register_metrics(registry: &Registry) {
     registry
         .register(Box::new(QUERY_DISK_CACHE_MISS_COUNT.clone()))
         .expect("Metric registered");
+    registry
+        .register(Box::new(
+            QUERY_DISK_CACHE_INLINE_DOWNLOAD_FILES_CONSIDERED.clone(),
+        ))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(
+            QUERY_DISK_CACHE_INLINE_DOWNLOAD_FILES_FETCHED.clone(),
+        ))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(QUERY_DISK_CACHE_INLINE_DOWNLOAD_BYTES.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(
+            QUERY_DISK_CACHE_INLINE_DOWNLOAD_DURATION_SECONDS.clone(),
+        ))
+        .expect("Metric registered");
     // file downloader metrics
     registry
         .register(Box::new(FILE_DOWNLOADER_NORMAL_QUEUE_SIZE.clone()))
@@ -2004,6 +2188,26 @@ fn register_metrics(registry: &Registry) {
         .expect("Metric registered");
     registry
         .register(Box::new(TANTIVY_RESULT_CACHE_HITS_TOTAL.clone()))
+        .expect("Metric registered");
+
+    // metrics for generic bytes cache
+    registry
+        .register(Box::new(BYTES_CACHE_MEMORY_SIZE.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(BYTES_CACHE_ENTRY_COUNT.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(BYTES_CACHE_GC_TIME.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(BYTES_CACHE_GC_COUNT.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(BYTES_CACHE_HITS_TOTAL.clone()))
+        .expect("Metric registered");
+    registry
+        .register(Box::new(BYTES_CACHE_MISS_TOTAL.clone()))
         .expect("Metric registered");
 
     // tokio runtime metrics

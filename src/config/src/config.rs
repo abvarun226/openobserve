@@ -1582,6 +1582,12 @@ pub struct Limit {
     )]
     pub inverted_index_result_cache_max_entry_size: usize,
     #[env_config(
+        name = "ZO_INVERTED_INDEX_FOOTER_CACHE_MAX_SIZE",
+        default = 0, // MB, default is 5% of total memory, clamped to 100-1024 MB
+        help = "Maximum memory size in MB for the Tantivy and Puffin footer cache. Higher values allow caching more file footers but increase memory usage."
+    )]
+    pub inverted_index_footer_cache_max_size: usize,
+    #[env_config(
         name = "ZO_INVERTED_INDEX_SKIP_THRESHOLD",
         default = 35,
         help = "If the inverted index returns row_id more than this threshold(%), it will skip the inverted index."
@@ -1820,6 +1826,10 @@ pub struct DiskCache {
     pub gc_size: usize,
     #[env_config(name = "ZO_DISK_CACHE_GC_INTERVAL", default = 60)] // seconds
     pub gc_interval: u64,
+    // Bytes, files at or below this size are downloaded synchronously before a query starts.
+    // Set to 0 to disable inline downloading.
+    #[env_config(name = "ZO_DISK_CACHE_INLINE_DOWNLOAD_MAX_SIZE", default = 2097152)]
+    pub inline_download_max_size: usize,
     // Days, files with data older than this will not be downloaded into the cache,
     // queries read them directly from object storage. default 0 means no limit
     #[env_config(name = "ZO_DISK_CACHE_MAX_AGE_DAYS", default = 0)]
@@ -2842,6 +2852,14 @@ fn check_memory_config(cfg: &mut Config) -> Result<(), anyhow::Error> {
     }
     if cfg.limit.query_default_limit == 0 {
         cfg.limit.query_default_limit = 1000;
+    }
+
+    if cfg.limit.inverted_index_footer_cache_max_size == 0 {
+        cfg.limit.inverted_index_footer_cache_max_size =
+            ((cfg.limit.mem_total as f64 / SIZE_IN_MB * 0.05) as usize).clamp(100, 1024)
+                * (SIZE_IN_MB as usize);
+    } else {
+        cfg.limit.inverted_index_footer_cache_max_size *= SIZE_IN_MB as usize;
     }
     Ok(())
 }
