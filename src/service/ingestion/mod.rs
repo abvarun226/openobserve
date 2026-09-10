@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use config::{
     SIZE_IN_MB, TIMESTAMP_COL_NAME,
     cluster::{LOCAL_NODE, LOCAL_NODE_ID},
