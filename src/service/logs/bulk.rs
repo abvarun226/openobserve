@@ -16,18 +16,17 @@
 use std::collections::HashMap;
 
 use actix_web::web;
-use rayon::prelude::*;
 use config::{
     BLOCKED_STREAMS, TIMESTAMP_COL_NAME, get_config,
     meta::stream::{StreamParams, StreamType},
     metrics,
     utils::{
-        flatten,
-        json,
+        flatten, json,
         time::{now_micros, parse_timestamp_micro_from_value},
     },
 };
 use infra::{errors::Result, schema::get_flatten_level};
+use rayon::prelude::*;
 
 use crate::{
     common::meta::ingestion::{
@@ -76,7 +75,8 @@ pub async fn ingest(
     let stream_type = StreamType::Logs;
 
     let mut stream_key_cache: HashMap<String, String> = HashMap::new();
-    let mut streams_data: HashMap<String, Vec<(i64, json::Map<String, json::Value>)>> = HashMap::new();
+    let mut streams_data: HashMap<String, Vec<(i64, json::Map<String, json::Value>)>> =
+        HashMap::new();
     let mut next_line_is_data = false;
 
     // Zero-copy line scanning: store byte ranges for parallel JSON parsing
@@ -288,7 +288,11 @@ pub async fn ingest(
     // Process parsed results sequentially
     for record in parsed_results {
         match record {
-            ParsedRecord::Ok { val, stream_idx, timestamp } => {
+            ParsedRecord::Ok {
+                val,
+                stream_idx,
+                timestamp,
+            } => {
                 let (ref rec_stream_name, _) = stream_names[stream_idx];
                 match streams_data.get_mut(rec_stream_name) {
                     Some(v) => v.push((timestamp, val)),
@@ -297,7 +301,11 @@ pub async fn ingest(
                     }
                 }
             }
-            ParsedRecord::TimestampError { value, stream_idx, doc_id } => {
+            ParsedRecord::TimestampError {
+                value,
+                stream_idx,
+                doc_id,
+            } => {
                 let (ref sn, ref act) = stream_names[stream_idx];
                 bulk_res.errors = true;
                 metrics::INGEST_ERRORS
@@ -305,11 +313,21 @@ pub async fn ingest(
                     .inc();
                 log_failed_record(log_ingestion_errors, &value, TS_PARSE_FAILED);
                 add_record_status(
-                    sn.clone(), doc_id, act.clone(), Some(value), &mut bulk_res,
-                    Some(TS_PARSE_FAILED.to_string()), Some(TS_PARSE_FAILED.to_string()),
+                    sn.clone(),
+                    doc_id,
+                    act.clone(),
+                    Some(value),
+                    &mut bulk_res,
+                    Some(TS_PARSE_FAILED.to_string()),
+                    Some(TS_PARSE_FAILED.to_string()),
                 );
             }
-            ParsedRecord::OutOfRange { value, stream_idx, doc_id, too_old } => {
+            ParsedRecord::OutOfRange {
+                value,
+                stream_idx,
+                doc_id,
+                too_old,
+            } => {
                 let (ref sn, ref act) = stream_names[stream_idx];
                 bulk_res.errors = true;
                 let reason = if too_old {
@@ -322,8 +340,13 @@ pub async fn ingest(
                     .inc();
                 log_failed_record(log_ingestion_errors, &value, TS_PARSE_FAILED);
                 add_record_status(
-                    sn.clone(), doc_id, act.clone(), Some(value), &mut bulk_res,
-                    Some(TS_PARSE_FAILED.to_string()), Some(reason),
+                    sn.clone(),
+                    doc_id,
+                    act.clone(),
+                    Some(value),
+                    &mut bulk_res,
+                    Some(TS_PARSE_FAILED.to_string()),
+                    Some(reason),
                 );
             }
             ParsedRecord::ParseError => {
@@ -337,11 +360,9 @@ pub async fn ingest(
     // Route each stream through ingest.rs (pipeline path) or write_logs (direct path).
     for (stream_name, records) in streams_data {
         let stream_param = StreamParams::new(org_id, &stream_name, stream_type);
-        let has_pipeline = crate::service::ingestion::get_stream_executable_pipeline(
-            &stream_param,
-        )
-        .await
-        .is_some();
+        let has_pipeline = crate::service::ingestion::get_stream_executable_pipeline(&stream_param)
+            .await
+            .is_some();
 
         if has_pipeline {
             // Pipeline-enabled: convert to Vec<json::Value> and route through ingest.rs

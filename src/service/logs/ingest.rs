@@ -354,9 +354,7 @@ pub async fn ingest(
             }
 
             // add `_original` and '_record_id` if required by StreamSettings
-            if need_original
-                && let Some(original_data) = original_data
-            {
+            if need_original && let Some(original_data) = original_data {
                 local_val.insert(ORIGINAL_DATA_COL_NAME.to_string(), original_data.into());
                 let record_id = crate::service::ingestion::generate_record_id(
                     org_id,

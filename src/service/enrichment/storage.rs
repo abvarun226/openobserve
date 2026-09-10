@@ -158,11 +158,9 @@ impl Values {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| anyhow!("Failed to convert VRL to RecordBatch: {}", e))
             }
-            Values::Json(data) => {
-                convert_json_to_record_batch(schema, data)
-                    .map(|batch| vec![batch])
-                    .map_err(|e| anyhow!("Failed to convert JSON to RecordBatch: {}", e))
-            }
+            Values::Json(data) => convert_json_to_record_batch(schema, data)
+                .map(|batch| vec![batch])
+                .map_err(|e| anyhow!("Failed to convert JSON to RecordBatch: {}", e)),
         }
     }
 }

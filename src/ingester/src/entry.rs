@@ -63,7 +63,8 @@ impl Entry {
             // par_chunks reduces scheduling overhead vs per-record par_iter.
             let num_threads = rayon::current_num_threads();
             let chunk_size = (self.data.len() / num_threads).max(64);
-            let chunk_bytes: Vec<Vec<u8>> = self.data
+            let chunk_bytes: Vec<Vec<u8>> = self
+                .data
                 .par_chunks(chunk_size)
                 .map(|chunk| {
                     // Pre-estimate ~800 bytes per record (50 fields × ~16 bytes)
@@ -77,8 +78,8 @@ impl Entry {
                     buf
                 })
                 .collect();
-            let total_len: usize = chunk_bytes.iter().map(|c| c.len()).sum::<usize>()
-                + chunk_bytes.len() + 1;
+            let total_len: usize =
+                chunk_bytes.iter().map(|c| c.len()).sum::<usize>() + chunk_bytes.len() + 1;
             let mut data = Vec::with_capacity(total_len);
             data.push(b'[');
             for (i, chunk) in chunk_bytes.iter().enumerate() {
@@ -93,8 +94,15 @@ impl Entry {
             serde_json::to_vec(&self.data).context(JSONSerializationSnafu)?
         };
         let data_size = data.len();
-        let header_size = 2 + stream.len() + 2 + schema_key.len()
-            + 2 + partition_key.len() + 4 + 2 + self.org_id.len();
+        let header_size = 2
+            + stream.len()
+            + 2
+            + schema_key.len()
+            + 2
+            + partition_key.len()
+            + 4
+            + 2
+            + self.org_id.len();
         let mut buf = Vec::with_capacity(header_size + data_size);
         buf.write_u16::<BigEndian>(stream.len() as u16)
             .context(WriteDataSnafu)?;
@@ -122,8 +130,15 @@ impl Entry {
         let data_size = data.len();
         self.data_size = data_size;
         // Pre-allocate with exact capacity to avoid growth
-        let header_size = 2 + stream.len() + 2 + schema_key.len()
-            + 2 + partition_key.len() + 4 + 2 + self.org_id.len();
+        let header_size = 2
+            + stream.len()
+            + 2
+            + schema_key.len()
+            + 2
+            + partition_key.len()
+            + 4
+            + 2
+            + self.org_id.len();
         let mut buf = Vec::with_capacity(header_size + data_size);
         buf.write_u16::<BigEndian>(stream.len() as u16)
             .context(WriteDataSnafu)?;

@@ -752,8 +752,7 @@ mod tests {
         let r1: serde_json::Value =
             serde_json::from_str(r#"{"Year": 1896, "City": "Athens"}"#).unwrap();
         let r2: serde_json::Value =
-            serde_json::from_str(r#"{"Year": 1900, "City": "Paris", "Sport": "Fencing"}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"Year": 1900, "City": "Paris", "Sport": "Fencing"}"#).unwrap();
         let records: Vec<&Map<String, Value>> =
             vec![r1.as_object().unwrap(), r2.as_object().unwrap()];
 

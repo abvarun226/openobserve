@@ -110,7 +110,9 @@ pub fn pickup_string_value(val: Value) -> String {
 
 #[inline]
 fn count_digits_u64(v: u64) -> usize {
-    if v == 0 { return 1; }
+    if v == 0 {
+        return 1;
+    }
     // log10 floor + 1
     (v.ilog10() as usize) + 1
 }
@@ -140,14 +142,21 @@ pub fn estimate_json_bytes(val: &Value) -> usize {
                         if let Some(v) = n.as_u64() {
                             size += count_digits_u64(v);
                         } else if let Some(v) = n.as_i64() {
-                            size += if v < 0 { 1 + count_digits_u64(v.unsigned_abs()) } else { count_digits_u64(v as u64) };
+                            size += if v < 0 {
+                                1 + count_digits_u64(v.unsigned_abs())
+                            } else {
+                                count_digits_u64(v as u64)
+                            };
                         } else {
                             size += 20;
                         }
                     }
                     Value::Bool(b) => size += if *b { 4 } else { 5 },
                     Value::Null => {} // skip nulls
-                    _ => { has_nested = true; size += estimate_json_bytes(v); }
+                    _ => {
+                        has_nested = true;
+                        size += estimate_json_bytes(v);
+                    }
                 }
             }
             // remove ',' for last item
@@ -174,7 +183,11 @@ pub fn estimate_json_bytes(val: &Value) -> usize {
             if let Some(v) = n.as_u64() {
                 size += count_digits_u64(v);
             } else if let Some(v) = n.as_i64() {
-                size += if v < 0 { 1 + count_digits_u64(v.unsigned_abs()) } else { count_digits_u64(v as u64) };
+                size += if v < 0 {
+                    1 + count_digits_u64(v.unsigned_abs())
+                } else {
+                    count_digits_u64(v as u64)
+                };
             } else {
                 // f64 — fast estimate: sign(1) + digits(~17) + dot(1) = ~20 max
                 size += 20;

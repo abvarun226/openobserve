@@ -1980,9 +1980,21 @@ mod test {
         let batch = convert_json_to_record_batch(&schema, &data).unwrap();
         assert_eq!(batch.num_rows(), 2);
 
-        let col_a = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        let col_b = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-        let col_c = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_a = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let col_b = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let col_c = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
 
         // Row 0
         assert_eq!(col_a.value(0), 1);
@@ -2013,8 +2025,16 @@ mod test {
         let batch = convert_json_to_record_batch(&schema, &data).unwrap();
         assert_eq!(batch.num_rows(), 2);
 
-        let col_a = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        let col_b = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_a = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let col_b = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
 
         assert_eq!(col_a.value(0), 1);
         assert_eq!(col_b.value(0), 2);
@@ -2040,8 +2060,16 @@ mod test {
         let batch = convert_json_to_record_batch(&schema, &data).unwrap();
         assert_eq!(batch.num_rows(), 3);
 
-        let col_x = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        let col_y = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let col_x = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let col_y = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
 
         assert_eq!(col_x.value(0), 10);
         assert_eq!(col_x.value(1), 20);
@@ -2070,9 +2098,21 @@ mod test {
         let batch = convert_json_to_record_batch(&schema, &data).unwrap();
         assert_eq!(batch.num_rows(), 2);
 
-        let col_a = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        let col_b = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-        let col_c = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col_a = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let col_b = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let col_c = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
 
         assert_eq!(col_a.value(0), 1);
         assert_eq!(col_b.value(0), 2);

@@ -128,10 +128,7 @@ fn parse_bulk_index_fast(line: &[u8]) -> Option<(&str, &str, Option<&str>)> {
     Some((action, index, doc_id))
 }
 
-pub fn cast_to_type(
-    value: &mut Map<String, Value>,
-    delta: &[Field],
-) -> Result<(), anyhow::Error> {
+pub fn cast_to_type(value: &mut Map<String, Value>, delta: &[Field]) -> Result<(), anyhow::Error> {
     let mut parse_error = String::new();
     for field in delta {
         let field_name = field.name();
@@ -477,20 +474,26 @@ pub(crate) async fn write_logs(
         // directly without per-record iteration.
         let (first_ts, ref first_rec) = json_data[0];
         let hour_key = get_write_partition_key(
-            first_ts, &partition_keys, partition_time_level,
-            first_rec, Some(&schema_key),
+            first_ts,
+            &partition_keys,
+            partition_time_level,
+            first_rec,
+            Some(&schema_key),
         );
         let records: Vec<Value> = json_data
             .into_iter()
             .map(|(_, map)| Value::Object(map))
             .collect();
         let record_count = records.len();
-        write_buf.insert(hour_key, SchemaRecords {
-            schema_key: schema_key.clone(),
-            schema: rec_schema.clone(),
-            records_size: 0,
-            records,
-        });
+        write_buf.insert(
+            hour_key,
+            SchemaRecords {
+                schema_key: schema_key.clone(),
+                schema: rec_schema.clone(),
+                records_size: 0,
+                records,
+            },
+        );
         // Generate bulk response success items for the fast path.
         match status {
             IngestionStatus::Record(status) => {
@@ -511,190 +514,197 @@ pub(crate) async fn write_logs(
             }
         }
     } else {
-
-    for (timestamp, mut record_val) in json_data {
-        let doc_id = if batch_has_doc_id {
-            record_val
-                .get("_id")
-                .map(|v| v.as_str().unwrap().to_string())
-        } else {
-            None
-        };
-
-        // validate record
-        if let Some(delta) = cast_delta.as_ref() {
-            let ret_val = if !delta.is_empty() {
-                cast_to_type(&mut record_val, delta)
+        for (timestamp, mut record_val) in json_data {
+            let doc_id = if batch_has_doc_id {
+                record_val
+                    .get("_id")
+                    .map(|v| v.as_str().unwrap().to_string())
             } else {
-                Ok(())
+                None
             };
-            if let Err(e) = ret_val {
-                // update status(fail)
-                match status {
-                    IngestionStatus::Record(status) => {
-                        status.failed += 1;
-                        status.error = e.to_string();
-                        metrics::INGEST_ERRORS
-                            .with_label_values(&[
-                                org_id,
-                                StreamType::Logs.as_str(),
-                                stream_name,
-                                SCHEMA_CONFORMANCE_FAILED,
-                            ])
-                            .inc();
-                        log_failed_record(log_ingest_errors, &record_val, &e.to_string());
-                    }
-                    IngestionStatus::Bulk(bulk_res) => {
-                        bulk_res.errors = true;
-                        metrics::INGEST_ERRORS
-                            .with_label_values(&[
-                                org_id,
-                                StreamType::Logs.as_str(),
-                                stream_name,
-                                SCHEMA_CONFORMANCE_FAILED,
-                            ])
-                            .inc();
-                        log_failed_record(log_ingest_errors, &record_val, &e.to_string());
-                        bulk::add_record_status(
-                            stream_name.to_string(),
-                            doc_id,
-                            "".to_string(),
-                            Some(Value::Object(record_val.clone())),
-                            bulk_res,
-                            Some(bulk::SCHEMA_CONFORMANCE_FAILED.to_string()),
-                            Some(e.to_string()),
-                        );
-                    }
-                }
-                continue;
-            }
-        }
 
-        // start check for alert trigger
-        if let Some(alerts) = cur_stream_alerts
-            && triggers.len() < alerts.len()
-        {
-            let end_time = now_micros();
-            for alert in alerts {
-                let key = format!(
-                    "{}/{}/{}/{}",
-                    org_id,
-                    StreamType::Logs,
-                    alert.stream_name,
-                    alert.get_unique_key()
-                );
-                // For one alert, only one trigger per request
-                // Trigger for this alert is already added.
-                if evaluated_alerts.contains(&key) {
+            // validate record
+            if let Some(delta) = cast_delta.as_ref() {
+                let ret_val = if !delta.is_empty() {
+                    cast_to_type(&mut record_val, delta)
+                } else {
+                    Ok(())
+                };
+                if let Err(e) = ret_val {
+                    // update status(fail)
+                    match status {
+                        IngestionStatus::Record(status) => {
+                            status.failed += 1;
+                            status.error = e.to_string();
+                            metrics::INGEST_ERRORS
+                                .with_label_values(&[
+                                    org_id,
+                                    StreamType::Logs.as_str(),
+                                    stream_name,
+                                    SCHEMA_CONFORMANCE_FAILED,
+                                ])
+                                .inc();
+                            log_failed_record(log_ingest_errors, &record_val, &e.to_string());
+                        }
+                        IngestionStatus::Bulk(bulk_res) => {
+                            bulk_res.errors = true;
+                            metrics::INGEST_ERRORS
+                                .with_label_values(&[
+                                    org_id,
+                                    StreamType::Logs.as_str(),
+                                    stream_name,
+                                    SCHEMA_CONFORMANCE_FAILED,
+                                ])
+                                .inc();
+                            log_failed_record(log_ingest_errors, &record_val, &e.to_string());
+                            bulk::add_record_status(
+                                stream_name.to_string(),
+                                doc_id,
+                                "".to_string(),
+                                Some(Value::Object(record_val.clone())),
+                                bulk_res,
+                                Some(bulk::SCHEMA_CONFORMANCE_FAILED.to_string()),
+                                Some(e.to_string()),
+                            );
+                        }
+                    }
                     continue;
                 }
-                match alert
-                    .evaluate(Some(&record_val), (None, end_time), None)
-                    .await
-                {
-                    Ok(trigger_results) if trigger_results.data.is_some() => {
-                        triggers.push((alert.clone(), trigger_results.data.unwrap()));
-                        evaluated_alerts.insert(key);
+            }
+
+            // start check for alert trigger
+            if let Some(alerts) = cur_stream_alerts
+                && triggers.len() < alerts.len()
+            {
+                let end_time = now_micros();
+                for alert in alerts {
+                    let key = format!(
+                        "{}/{}/{}/{}",
+                        org_id,
+                        StreamType::Logs,
+                        alert.stream_name,
+                        alert.get_unique_key()
+                    );
+                    // For one alert, only one trigger per request
+                    // Trigger for this alert is already added.
+                    if evaluated_alerts.contains(&key) {
+                        continue;
                     }
-                    Ok(_) => {
-                        // the data doesn't satisfy the alert condition
-                    }
-                    Err(e) => {
-                        log::error!("[LOGS] Error while evaluating realtime alert: {e}");
+                    match alert
+                        .evaluate(Some(&record_val), (None, end_time), None)
+                        .await
+                    {
+                        Ok(trigger_results) if trigger_results.data.is_some() => {
+                            triggers.push((alert.clone(), trigger_results.data.unwrap()));
+                            evaluated_alerts.insert(key);
+                        }
+                        Ok(_) => {
+                            // the data doesn't satisfy the alert condition
+                        }
+                        Err(e) => {
+                            log::error!("[LOGS] Error while evaluating realtime alert: {e}");
+                        }
                     }
                 }
             }
-        }
-        // end check for alert triggers
+            // end check for alert triggers
 
-        // get distinct_value items
-        if stream_settings.enable_distinct_fields {
-            let mut map = Map::new();
-            for field in DISTINCT_FIELDS.iter().chain(
-                stream_settings
-                    .distinct_value_fields
-                    .iter()
-                    .map(|f| &f.name),
-            ) {
-                if let Some(val) = record_val.get(field) {
-                    map.insert(field.clone(), val.clone());
+            // get distinct_value items
+            if stream_settings.enable_distinct_fields {
+                let mut map = Map::new();
+                for field in DISTINCT_FIELDS.iter().chain(
+                    stream_settings
+                        .distinct_value_fields
+                        .iter()
+                        .map(|f| &f.name),
+                ) {
+                    if let Some(val) = record_val.get(field) {
+                        map.insert(field.clone(), val.clone());
+                    }
+                }
+
+                if !map.is_empty() {
+                    // add distinct values
+                    distinct_values.push(MetadataItem::DistinctValues(DvItem {
+                        stream_type: StreamType::Logs,
+                        stream_name: stream_name.to_string(),
+                        value: map,
+                    }));
                 }
             }
 
-            if !map.is_empty() {
-                // add distinct values
-                distinct_values.push(MetadataItem::DistinctValues(DvItem {
-                    stream_type: StreamType::Logs,
-                    stream_name: stream_name.to_string(),
-                    value: map,
-                }));
-            }
-        }
-
-        // get hour key — reuse cached key when timestamp falls in same bucket
-        let bucket = if matches!(partition_time_level, PartitionTimeLevel::Daily) {
-            timestamp / 86_400_000_000
-        } else {
-            timestamp / 3_600_000_000
-        };
-        let hour_key = if partition_keys.is_empty() {
-            if let Some((cached_bucket, ref key)) = cached_partition {
-                if cached_bucket == bucket {
-                    key.clone()
+            // get hour key — reuse cached key when timestamp falls in same bucket
+            let bucket = if matches!(partition_time_level, PartitionTimeLevel::Daily) {
+                timestamp / 86_400_000_000
+            } else {
+                timestamp / 3_600_000_000
+            };
+            let hour_key = if partition_keys.is_empty() {
+                if let Some((cached_bucket, ref key)) = cached_partition {
+                    if cached_bucket == bucket {
+                        key.clone()
+                    } else {
+                        let k = get_write_partition_key(
+                            timestamp,
+                            &partition_keys,
+                            partition_time_level,
+                            &record_val,
+                            Some(&schema_key),
+                        );
+                        cached_partition = Some((bucket, k.clone()));
+                        k
+                    }
                 } else {
                     let k = get_write_partition_key(
-                        timestamp, &partition_keys, partition_time_level,
-                        &record_val, Some(&schema_key),
+                        timestamp,
+                        &partition_keys,
+                        partition_time_level,
+                        &record_val,
+                        Some(&schema_key),
                     );
                     cached_partition = Some((bucket, k.clone()));
                     k
                 }
             } else {
-                let k = get_write_partition_key(
-                    timestamp, &partition_keys, partition_time_level,
-                    &record_val, Some(&schema_key),
-                );
-                cached_partition = Some((bucket, k.clone()));
-                k
-            }
-        } else {
-            get_write_partition_key(
-                timestamp, &partition_keys, partition_time_level,
-                &record_val, Some(&schema_key),
-            )
-        };
+                get_write_partition_key(
+                    timestamp,
+                    &partition_keys,
+                    partition_time_level,
+                    &record_val,
+                    Some(&schema_key),
+                )
+            };
 
-        let hour_buf = write_buf.entry(hour_key).or_insert_with(|| SchemaRecords {
-            schema_key: schema_key.clone(),
-            schema: rec_schema.clone(),
-            records: vec![],
-            records_size: 0,
-        });
-        let record_val = Value::Object(record_val);
-        hour_buf.records.push(record_val);
-        // records_size is a pre-allocation hint; into_bytes resets it to the
-        // actual serialized length. Skip the per-record estimate_json_bytes
-        // walk to reduce CPU cost in the hot loop.
+            let hour_buf = write_buf.entry(hour_key).or_insert_with(|| SchemaRecords {
+                schema_key: schema_key.clone(),
+                schema: rec_schema.clone(),
+                records: vec![],
+                records_size: 0,
+            });
+            let record_val = Value::Object(record_val);
+            hour_buf.records.push(record_val);
+            // records_size is a pre-allocation hint; into_bytes resets it to the
+            // actual serialized length. Skip the per-record estimate_json_bytes
+            // walk to reduce CPU cost in the hot loop.
 
-        // update status(success)
-        match status {
-            IngestionStatus::Record(status) => {
-                status.successful += 1;
-            }
-            IngestionStatus::Bulk(bulk_res) => {
-                bulk::add_record_status(
-                    stream_name.to_string(),
-                    doc_id,
-                    "".to_string(),
-                    None,
-                    bulk_res,
-                    None,
-                    None,
-                );
+            // update status(success)
+            match status {
+                IngestionStatus::Record(status) => {
+                    status.successful += 1;
+                }
+                IngestionStatus::Bulk(bulk_res) => {
+                    bulk::add_record_status(
+                        stream_name.to_string(),
+                        doc_id,
+                        "".to_string(),
+                        None,
+                        bulk_res,
+                        None,
+                        None,
+                    );
+                }
             }
         }
-    }
-
     } // end else (slow path with per-record loop)
 
     // write data to wal

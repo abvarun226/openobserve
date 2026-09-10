@@ -13,15 +13,14 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#[cfg(feature = "enterprise")]
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
-#[cfg(feature = "enterprise")]
-use std::hash::{DefaultHasher, Hash, Hasher};
-
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -632,9 +631,7 @@ impl PipelineRecord {
             Self::Owned(record) => record,
             Self::Shared(record) => Arc::unwrap_or_clone(record),
             Self::VrlOwned(record) => record.try_into().unwrap_or_default(),
-            Self::VrlShared(record) => {
-                Arc::unwrap_or_clone(record).try_into().unwrap_or_default()
-            }
+            Self::VrlShared(record) => Arc::unwrap_or_clone(record).try_into().unwrap_or_default(),
         }
     }
 
@@ -1146,19 +1143,14 @@ async fn process_node(
             log::debug!("[Pipeline]: RemoteStream node processed {count} records");
             if count != 0 {
                 let batch_key_count = grouped_records.as_ref().map_or(1, HashMap::len);
-                let records_by_batch_key = uniform_batch_key
-                    .zip(Some(records))
-                    .into_iter()
-                    .chain(
-                        grouped_records
-                            .into_iter()
-                            .flatten()
-                            .map(|(batch_key, records)| (Cow::Owned(batch_key), records)),
-                    );
-
-                log::debug!(
-                    "[Pipeline]: Grouped records into {batch_key_count} batch keys"
+                let records_by_batch_key = uniform_batch_key.zip(Some(records)).into_iter().chain(
+                    grouped_records
+                        .into_iter()
+                        .flatten()
+                        .map(|(batch_key, records)| (Cow::Owned(batch_key), records)),
                 );
+
+                log::debug!("[Pipeline]: Grouped records into {batch_key_count} batch keys");
 
                 // Process each batch_key group separately
                 for (batch_key, batch_records) in records_by_batch_key {
@@ -1197,7 +1189,6 @@ async fn process_node(
 
                     // Check if buffer should be flushed to WAL
                     if let Some(records_to_write) = records_to_write {
-
                         log::debug!(
                             "[Pipeline]: Flushing buffer for batch_key '{}' - writing {} records to WAL",
                             batch_key,
@@ -1313,9 +1304,7 @@ pub async fn flush_all_buffers() -> Result<(), anyhow::Error> {
 
         for (pipeline_id, org_id, destination_name, records_to_write) in flush_jobs {
             let records_len = records_to_write.len();
-            log::debug!(
-                "[Pipeline]: Flushing buffer - writing {records_len} records to WAL"
-            );
+            log::debug!("[Pipeline]: Flushing buffer - writing {records_len} records to WAL");
 
             let remote_stream = config::meta::stream::RemoteStreamParams {
                 org_id: org_id.clone().into(),
