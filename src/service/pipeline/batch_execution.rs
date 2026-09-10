@@ -14,9 +14,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #[cfg(feature = "enterprise")]
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::{
     borrow::Cow,
+    hash::{DefaultHasher, Hash, Hasher},
+};
+use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
@@ -106,6 +108,7 @@ impl BatchBuffer {
     }
 }
 
+#[cfg(feature = "enterprise")]
 const BATCH_BUFFER_SHARDS: usize = 16;
 
 #[cfg(feature = "enterprise")]
